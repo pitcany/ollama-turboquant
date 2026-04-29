@@ -1120,6 +1120,12 @@ func (t *Tensor) DType() ml.DType {
 		return ml.DTypeI32
 	case C.GGML_TYPE_MXFP4:
 		return ml.DTypeMXFP4
+	case C.GGML_TYPE_TURBO2_0:
+		return ml.DTypeTurbo2
+	case C.GGML_TYPE_TURBO3_0:
+		return ml.DTypeTurbo3
+	case C.GGML_TYPE_TURBO4_0:
+		return ml.DTypeTurbo4
 	default:
 		return ml.DTypeOther
 	}
@@ -1139,6 +1145,12 @@ func ggmlDType(dtype ml.DType) uint32 {
 		return C.GGML_TYPE_I32
 	case ml.DTypeMXFP4:
 		return C.GGML_TYPE_MXFP4
+	case ml.DTypeTurbo2:
+		return C.GGML_TYPE_TURBO2_0
+	case ml.DTypeTurbo3:
+		return C.GGML_TYPE_TURBO3_0
+	case ml.DTypeTurbo4:
+		return C.GGML_TYPE_TURBO4_0
 	default:
 		panic("unsupported dtype")
 	}
@@ -1148,6 +1160,13 @@ func (t *Tensor) Cast(ctx ml.Context, dtype ml.DType) ml.Tensor {
 	return &Tensor{
 		b: t.b,
 		t: C.ggml_cast(ctx.(*Context).ctx, t.t, ggmlDType(dtype)),
+	}
+}
+
+func (t *Tensor) TurboWHT(ctx ml.Context, direction int, groupSize int) ml.Tensor {
+	return &Tensor{
+		b: t.b,
+		t: C.ggml_turbo_wht(ctx.(*Context).ctx, t.t, C.int(direction), C.int(groupSize), nil),
 	}
 }
 

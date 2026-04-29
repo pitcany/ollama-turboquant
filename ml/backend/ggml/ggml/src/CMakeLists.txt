@@ -205,6 +205,7 @@ add_library(ggml-base
             ggml-threading.h
             ggml-quants.c
             ggml-quants.h
+            ggml-turbo-quant.c
             mem_hip.cpp
             mem_nvml.cpp
             mem_dxgi_pdh.cpp
