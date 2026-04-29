@@ -409,6 +409,9 @@ const (
 	DTypeQ40
 	DTypeI32
 	DTypeMXFP4
+	DTypeTurbo2
+	DTypeTurbo3
+	DTypeTurbo4
 )
 
 type SamplingMode int

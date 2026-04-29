@@ -7,6 +7,20 @@ import (
 	"github.com/ollama/ollama/ml"
 )
 
+// turboWHT is the interface for TurboQuant Walsh-Hadamard Transform rotation.
+type turboWHT interface {
+	TurboWHT(ctx ml.Context, direction int, groupSize int) ml.Tensor
+}
+
+// isTurboDType checks if a DType is a TurboQuant KV cache type
+func isTurboDType(dt ml.DType) bool {
+	switch dt {
+	case ml.DTypeTurbo2, ml.DTypeTurbo3, ml.DTypeTurbo4:
+		return true
+	}
+	return false
+}
+
 // Attention implements scaled dot-product attention for transformer models:
 // Attention(Q, K, V) = softmax(QK^T/√d_k)V
 //
@@ -57,9 +71,27 @@ func AttentionWithVMLA(ctx ml.Context, query, key, value, sinks ml.Tensor, vmla 
 		key, value, mask = cache.Get(ctx)
 	}
 
+	// TurboQuant: detect turbo KV cache by checking the key tensor's DType.
+	// This is cache-wrapper-agnostic — works with Causal, HybridCache, WrapperCache, etc.
+	// K/V are already WHT-rotated by set_rows during Put(). Apply forward WHT to Q
+	// so the dot product Q_rot · K_rot^T preserves correct attention scores.
+	turbo := key != nil && isTurboDType(key.DType())
+	if turbo {
+		if t, ok := query.(turboWHT); ok {
+			query = t.TurboWHT(ctx, 0, 0) // direction=0 (forward), groupSize=0 (auto)
+		}
+	}
+
 	if sdpa, ok := query.(ml.ScaledDotProductAttention); ok {
 		cacheConfigApplied := cache != nil
-		return sdpa.ScaledDotProductAttention(ctx, key, value, mask, sinks, vmla, scale, cacheConfigApplied)
+		kqv := sdpa.ScaledDotProductAttention(ctx, key, value, mask, sinks, vmla, scale, cacheConfigApplied)
+		// TurboQuant: apply inverse WHT to attention output
+		if turbo {
+			if t, ok := kqv.(turboWHT); ok {
+				kqv = t.TurboWHT(ctx, 1, 0) // direction=1 (inverse)
+			}
+		}
+		return kqv
 	} else {
 		query = query.Permute(ctx, 0, 2, 1, 3)
 		key = key.Permute(ctx, 0, 2, 1, 3)
