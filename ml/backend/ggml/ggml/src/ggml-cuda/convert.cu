@@ -1,5 +1,6 @@
 #include "convert.cuh"
 #include "dequantize.cuh"
+#include "turbo-quant.cuh"
 
 #include <cstdint>
 
@@ -610,6 +611,62 @@ static void dequantize_row_mxfp4_cuda(const void * vx, dst_t * y, const int64_t 
     dequantize_block_mxfp4<<<nb, 32, 0, stream>>>(vx, y);
 }
 
+// ---- TurboQuant element-wise dequantize kernels ----
+
+template <typename dst_t>
+static __global__ void dequantize_block_turbo2_0(const void * __restrict__ vx, dst_t * __restrict__ y, const int64_t k) {
+    const int64_t i = (int64_t)blockDim.x * blockIdx.x + threadIdx.x;
+    if (i >= k) return;
+
+    const block_turbo2_0 * x = (const block_turbo2_0 *) vx;
+    const int64_t ib = i / QK_TURBO2;
+    const int     j  = i % QK_TURBO2;
+    const float norm = __half2float(x[ib].norm);
+    y[i] = ggml_cuda_cast<dst_t>(turbo2_dequant_element(&x[ib], j, norm));
+}
+
+template <typename dst_t>
+static __global__ void dequantize_block_turbo3_0(const void * __restrict__ vx, dst_t * __restrict__ y, const int64_t k) {
+    const int64_t i = (int64_t)blockDim.x * blockIdx.x + threadIdx.x;
+    if (i >= k) return;
+
+    const block_turbo3_0 * x = (const block_turbo3_0 *) vx;
+    const int64_t ib = i / QK_TURBO3;
+    const int     j  = i % QK_TURBO3;
+    const float norm = __half2float(x[ib].norm);
+    y[i] = ggml_cuda_cast<dst_t>(turbo3_dequant_element(&x[ib], j, norm));
+}
+
+template <typename dst_t>
+static __global__ void dequantize_block_turbo4_0(const void * __restrict__ vx, dst_t * __restrict__ y, const int64_t k) {
+    const int64_t i = (int64_t)blockDim.x * blockIdx.x + threadIdx.x;
+    if (i >= k) return;
+
+    const block_turbo4_0 * x = (const block_turbo4_0 *) vx;
+    const int64_t ib = i / QK_TURBO4;
+    const int     j  = i % QK_TURBO4;
+    const float norm = __half2float(x[ib].norm);
+    y[i] = ggml_cuda_cast<dst_t>(turbo4_dequant_element(&x[ib], j, norm));
+}
+
+template <typename dst_t>
+static void dequantize_row_turbo2_0_cuda(const void * vx, dst_t * y, const int64_t k, cudaStream_t stream) {
+    const int num_blocks = (k + CUDA_DEQUANTIZE_BLOCK_SIZE - 1) / CUDA_DEQUANTIZE_BLOCK_SIZE;
+    dequantize_block_turbo2_0<<<num_blocks, CUDA_DEQUANTIZE_BLOCK_SIZE, 0, stream>>>(vx, y, k);
+}
+
+template <typename dst_t>
+static void dequantize_row_turbo3_0_cuda(const void * vx, dst_t * y, const int64_t k, cudaStream_t stream) {
+    const int num_blocks = (k + CUDA_DEQUANTIZE_BLOCK_SIZE - 1) / CUDA_DEQUANTIZE_BLOCK_SIZE;
+    dequantize_block_turbo3_0<<<num_blocks, CUDA_DEQUANTIZE_BLOCK_SIZE, 0, stream>>>(vx, y, k);
+}
+
+template <typename dst_t>
+static void dequantize_row_turbo4_0_cuda(const void * vx, dst_t * y, const int64_t k, cudaStream_t stream) {
+    const int num_blocks = (k + CUDA_DEQUANTIZE_BLOCK_SIZE - 1) / CUDA_DEQUANTIZE_BLOCK_SIZE;
+    dequantize_block_turbo4_0<<<num_blocks, CUDA_DEQUANTIZE_BLOCK_SIZE, 0, stream>>>(vx, y, k);
+}
+
 template <typename src_t, typename dst_t>
 static __global__ void convert_unary(
         const void * __restrict__ vx, dst_t * __restrict__ y, const int64_t ne00, const int64_t ne01, const int64_t ne02,
@@ -701,6 +758,12 @@ to_fp16_cuda_t ggml_get_to_fp16_cuda(ggml_type type) {
             return dequantize_row_iq3_s_cuda;
         case GGML_TYPE_MXFP4:
             return dequantize_row_mxfp4_cuda;
+        case GGML_TYPE_TURBO2_0:
+            return dequantize_row_turbo2_0_cuda;
+        case GGML_TYPE_TURBO3_0:
+            return dequantize_row_turbo3_0_cuda;
+        case GGML_TYPE_TURBO4_0:
+            return dequantize_row_turbo4_0_cuda;
         case GGML_TYPE_F32:
             return convert_unary_cont_cuda<float>;
         case GGML_TYPE_BF16:
@@ -752,6 +815,12 @@ to_fp32_cuda_t ggml_get_to_fp32_cuda(ggml_type type) {
             return dequantize_row_iq3_s_cuda;
         case GGML_TYPE_MXFP4:
             return dequantize_row_mxfp4_cuda;
+        case GGML_TYPE_TURBO2_0:
+            return dequantize_row_turbo2_0_cuda;
+        case GGML_TYPE_TURBO3_0:
+            return dequantize_row_turbo3_0_cuda;
+        case GGML_TYPE_TURBO4_0:
+            return dequantize_row_turbo4_0_cuda;
         case GGML_TYPE_F16:
             return convert_unary_cont_cuda<half>;
         case GGML_TYPE_BF16:

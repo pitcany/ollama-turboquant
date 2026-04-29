@@ -66,6 +66,10 @@ if (CUDAToolkit_FOUND)
         list(APPEND GGML_SOURCES_CUDA ${SRCS})
     endif()
 
+    file(GLOB   SRCS "template-instances/fattn-vec*turbo*.cu")
+    list(APPEND GGML_SOURCES_CUDA ${SRCS})
+    list(APPEND GGML_SOURCES_CUDA turbo-innerq.cu turbo-wht.cu)
+
     ggml_add_backend_library(ggml-cuda
                              ${GGML_HEADERS_CUDA}
                              ${GGML_SOURCES_CUDA}
