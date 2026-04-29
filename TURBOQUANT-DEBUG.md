@@ -5,6 +5,11 @@
 ### Commit History (branch: feature/turboquant-kv-cache)
 
 ```
+92107f1 docs: add systemd service setup and library discovery notes
+aefcdeb perf: wire CUDA WHT kernel and optimize turbo KQ dot products
+7a487a4 chore: rename binary to ollama-tq, consolidate docs, update gitignore
+17e29b6 fix: correct CUDA flash attention for TurboQuant KV cache types
+6aecb28 docs: add GPU debug guide for turbo4 SIGABRT diagnosis
 2225e1f feat: add CUDA turbo flash attention and set-rows WHT kernels
 7f10cc2 feat: add CPU turbo implementation and CGo bindings
 ba0a120 fix: reuse deprecated type slots 36-38 for TurboQuant (keeps COUNT=40)
@@ -26,27 +31,23 @@ cdac18f feat: TurboQuant KV cache integration (Go scaffolding)
 
 6. **CUDA architecture 120 for RTX 5090**: Missing SM 120 (Blackwell) architecture caused silent GPU discovery failure. **Fixed** by adding to CMAKE_CUDA_ARCHITECTURES.
 
+7. **CUDA flash attention SIGABRT for turbo KV types**: The FA kernel selector dispatched turbo KV types to MMA/WMMA/tile kernels that lack turbo support, triggering `GGML_ABORT`. **Fixed** by forcing VEC kernel for turbo types in `fattn.cu`; returns NONE when the vector kernel is unavailable so the scheduler falls back.
+
+8. **Garbled GPU output (Q/K element mismatch)**: The turbo KQ dot products in `fattn-common.cuh` used an interleaved K access pattern where threads within a sub-group accessed adjacent K elements but read mismatched Q values from thread-local registers. **Fixed** by restructuring all three turbo dot products to mirror the F16 pattern: each thread loads contiguous K elements at offset `(tid%nthreads)*cpy_ne`, matching Q_reg layout.
+
+9. **5x speed regression (35 vs 175 t/s)**: `GGML_OP_TURBO_WHT` (Walsh-Hadamard Transform) had no CUDA backend dispatch — the existing `turbo-wht.cu` kernel was present but unwired. Every attention layer fell back to CPU for Q rotation + inverse output rotation, causing 56 PCIe round-trips per token. **Fixed** by adding the op dispatch and `supports_op` entry in `ggml-cuda.cu`.
+
+10. **Turbo KQ dot product __constant__ memory serialization**: Centroid table lookups from `__constant__` memory serialized across warps (up to 16 serialized reads for turbo4's 16-entry table). **Fixed** by copying centroids to register arrays, bulk-loading packed `qs[]` bytes as uint32_t/uint16_t, and pre-scaling centroids by block norm.
+
 ### Current State
 
 | Test | Result |
 |------|--------|
-| f16 GPU (RTX 4090) | **Working** — 207.8 t/s |
-| turbo4 GPU (RTX 4090) | **SIGABRT** during first inference |
-| turbo4 CPU | **Working** — ~35 t/s, correct output |
-| turbo4 CPU quality | Correct: "Four", "2,3,5,7,11", Pythagorean theorem |
-
-### Current GPU Crash
-
-The turbo4 GPU crash happens during the first forward pass after successful model loading:
-
-```
-load request: KvCacheType:turbo4, GPULayers:29, offloaded 29/29 layers to GPU
-kv cache device=CUDA0 size=59.5 MiB
-llama runner started in 0.80 seconds
-SIGABRT: abort
-```
-
-The model loads, weights transfer to GPU, KV cache allocates as turbo4 on GPU. Then the first inference triggers `GGML_ABORT("fatal error")` somewhere in the CUDA flash attention dispatch.
+| f16 GPU (RTX 4090) | **Working** — 175 t/s gen, 3791 t/s prompt |
+| turbo4 GPU (RTX 4090) | **Working** — 163 t/s gen, 3297 t/s prompt (93% of f16) |
+| turbo4 KV cache savings | 3.7x smaller (59.5 MiB vs 224 MiB for qwen2.5:7b @ 4K ctx) |
+| turbo4 GPU layers (qwen3.6:27b @ 65K) | 64/65 on GPU (vs 56/65 with f16) |
+| Go FA regression tests | 2/2 PASS |
 
 ## Build Commands
 
@@ -108,95 +109,6 @@ cp ollama-tq ~/.local/bin/ollama-tq
 sudo systemctl restart ollama-tq
 ```
 
-## Diagnosis Steps for the GPU SIGABRT
-
-### Step 1: Identify the exact abort location
-
-Add `fprintf(stderr, ...)` debug prints to the CUDA flash attention dispatch chain. The abort is `GGML_ABORT("fatal error")` which exists in multiple places in `fattn.cu`.
-
-**File**: `ml/backend/ggml/ggml/src/ggml-cuda/fattn.cu`
-
-Add before each `GGML_ABORT("fatal error")`:
-```c
-fprintf(stderr, "TURBO DEBUG: abort at %s:%d, K->type=%d, V->type=%d, Q->ne[0]=%lld, K->ne[1]=%lld\n",
-    __FILE__, __LINE__, K->type, V->type, (long long)Q->ne[0], (long long)K->ne[1]);
-```
-
-There are multiple `GGML_ABORT` calls in fattn.cu:
-- Line ~136: in `ggml_cuda_flash_attn_ext_mma` (MMA kernel dispatch)
-- Line ~229: in `ggml_cuda_flash_attn_ext_vec` (VEC kernel dispatch)
-- Others in tile/wmma dispatchers
-
-This tells us WHICH dispatcher is aborting and with what tensor dimensions.
-
-### Step 2: Check kernel selection
-
-**File**: `ml/backend/ggml/ggml/src/ggml-cuda/fattn.cu`
-
-In `ggml_cuda_get_best_fattn_kernel()` (~line 232), add:
-```c
-fprintf(stderr, "TURBO DEBUG: best_fattn K->type=%d V->type=%d Q->ne[0]=%lld K->ne[1]=%lld\n",
-    K->type, V->type, (long long)Q->ne[0], (long long)K->ne[1]);
-```
-
-And at the return statement:
-```c
-fprintf(stderr, "TURBO DEBUG: selected kernel=%d\n", result);
-```
-
-This tells us which kernel type was selected (VEC=100, TILE=200, MMA=300, etc.).
-
-### Step 3: Check can_use_vector_kernel
-
-The vector kernel requires `K->ne[1] % FATTN_KQ_STRIDE == 0` where `FATTN_KQ_STRIDE=256`. If the KV cache has fewer than 256 entries, the vector kernel can't be used and the code falls to MMA/WMMA/tile kernels, which don't have turbo support.
-
-Add after `can_use_vector_kernel` calculation:
-```c
-fprintf(stderr, "TURBO DEBUG: can_use_vec=%d K_ne1=%lld stride=%d\n",
-    can_use_vector_kernel, (long long)K->ne[1], FATTN_KQ_STRIDE);
-```
-
-### Step 4: Rebuild and test
-
-```bash
-cmake --build build -j$(nproc)
-# copy libs, go clean, go build (see build commands above)
-CUDA_VISIBLE_DEVICES=0 OLLAMA_HOST=localhost:9999 \
-  OLLAMA_KV_CACHE_TYPE=turbo4 OLLAMA_FLASH_ATTENTION=1 \
-  OLLAMA_NEW_ENGINE=1 OLLAMA_CONTEXT_LENGTH=4096 \
-  ./ollama-tq serve 2>&1 | grep "TURBO DEBUG"
-```
-
-### Step 5: Apply the fix based on findings
-
-**If can_use_vector_kernel is false**: Force vector kernel for turbo types:
-```c
-// In ggml_cuda_get_best_fattn_kernel, after can_use_vector_kernel is computed:
-const bool is_turbo = K->type == GGML_TYPE_TURBO2_0 || K->type == GGML_TYPE_TURBO3_0 || K->type == GGML_TYPE_TURBO4_0;
-if (is_turbo) {
-    if (can_use_vector_kernel) {
-        return BEST_FATTN_KERNEL_VEC;
-    }
-    return BEST_FATTN_KERNEL_NONE;  // fall back to CPU attention
-}
-```
-
-**If the abort is in MMA/WMMA dispatcher**: The kernel selector chose a non-VEC kernel that doesn't have turbo support. Fix by adding turbo check to force VEC or return NONE.
-
-**If K->ne[1] is the issue**: The KV cache stride doesn't meet FATTN_KQ_STRIDE requirements. This is a legitimate limitation — turbo FA templates only support D=64/128/256 and K_ne1 % 256 == 0.
-
-## Structural Comparison with ollama-tq
-
-The existing working ollama-tq build at `~/.local/src/ollama-tq/ollama/` handles this differently:
-- Uses C-level WHT rotation (not Go attention hooks)
-- No flash attention template instances (uses modular kernels)
-- Uses `tqp_set_default_rotation()` at global init time
-- Different type naming (TQ4P_D128 etc.)
-
-Our approach uses CUDA flash attention templates (same as the TurboQuant fork), which requires the VEC kernel path. The fork's flash attention dispatch probably has the same constraint but may handle it differently.
-
-**To check**: `grep -n "FATTN_KQ_STRIDE\|can_use_vector" /tmp/turboquant-fork/ggml/src/ggml-cuda/fattn.cu`
-
 ## Files Reference
 
 | File | Purpose |
@@ -206,12 +118,13 @@ Our approach uses CUDA flash attention templates (same as the TurboQuant fork), 
 | `ml/backend/ggml/ggml/src/ggml-turbo-quant.c` | CPU WHT + PolarQuant |
 | `ml/backend/ggml/ggml/src/ggml-common.h` | Block struct definitions |
 | `ml/backend/ggml/ggml/src/ggml-cpu/ggml-cpu.c` | CPU type traits + vec_dot |
-| `ml/backend/ggml/ggml/src/ggml-cuda/fattn.cu` | **Flash attention dispatch (ABORT here)** |
-| `ml/backend/ggml/ggml/src/ggml-cuda/fattn-common.cuh` | Turbo KQ dot + V dequant |
-| `ml/backend/ggml/ggml/src/ggml-cuda/fattn-vec.cuh` | Turbo constexprs + externs |
+| `ml/backend/ggml/ggml/src/ggml-cuda/fattn.cu` | FA kernel selector (turbo → VEC only) |
+| `ml/backend/ggml/ggml/src/ggml-cuda/fattn-common.cuh` | Turbo KQ dot products + V dequant |
+| `ml/backend/ggml/ggml/src/ggml-cuda/fattn-vec.cuh` | Turbo constexprs + extern declarations |
+| `ml/backend/ggml/ggml/src/ggml-cuda/turbo-wht.cu` | CUDA WHT kernel (butterfly transform) |
 | `ml/backend/ggml/ggml/src/ggml-cuda/set-rows.cu` | GPU WHT quantization kernel |
-| `ml/backend/ggml/ggml/src/ggml-cuda/ggml-cuda.cu` | Op dispatch + supports_op |
+| `ml/backend/ggml/ggml/src/ggml-cuda/ggml-cuda.cu` | Op dispatch + supports_op (incl. TURBO_WHT) |
 | `ml/backend/ggml/ggml/src/ggml-cuda/convert.cu` | Turbo dequant CUDA kernels |
 | `ml/nn/attention.go` | WHT rotation hooks |
+| `ml/backend/ggml/flash_attention_turbo_test.go` | Go regression tests for FA selector |
 | `hide-ggml.ver` | Linker version script |
-| `TURBOQUANT.md` | Main documentation |
