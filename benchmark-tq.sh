@@ -3,7 +3,7 @@
 # Usage: ./benchmark-tq.sh
 set -euo pipefail
 
-OLLAMA_BIN="./ollama-tq"
+OLLAMA_BIN="$HOME/.local/bin/ollama-tq"
 PORT=9997
 HOST="localhost:$PORT"
 RESULTS_FILE="benchmark-results-$(date +%Y%m%d-%H%M%S).md"
@@ -21,7 +21,7 @@ MODEL_STORES=("") # empty = default store
 FREE_VRAM=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | sort -rn | head -1)
 if [ "$FREE_VRAM" -gt 20000 ]; then
     MODELS+=("qwen3.6:27b")
-    MODEL_STORES+=("/home/yannik/.ollama/models-d256")
+    MODEL_STORES+=("")
 fi
 
 KV_TYPES=("" "turbo4")  # empty = f16 default

@@ -533,9 +533,11 @@ static __device__ __forceinline__ void dequantize_V_q8_0(const void * __restrict
 }
 
 // ---- Turbo KQ dot products (float2 Q path, like f16) ----
-// Each thread processes its own contiguous K element block, matching the Q_reg layout.
-// This mirrors the F16 vec_dot_fattn_vec_KQ_f16 pattern where thread t reads
-// K at offset (t%nthreads)*cpy_ne, ensuring K[i] pairs with Q[i].
+// Each thread processes contiguous K elements matching Q_reg layout (same as f16 pattern).
+// Optimizations vs scalar dequant-per-element:
+//   1. Bulk-load packed qs[] bytes as uint32_t/uint16_t (coalesced, 1 load per 4-8 elements)
+//   2. Pre-scale centroids by block norm (N_centroids muls replaces 2*D per-element muls)
+//   3. Centroids copied to registers (avoids __constant__ memory warp serialization)
 
 template <int D, int nthreads>
 static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_turbo2(
@@ -548,20 +550,38 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_turbo2(
     constexpr int cpy_nb = ggml_cuda_get_max_cpy_bytes();
     constexpr int cpy_ne = cpy_nb / 4;
 
+    // Copy centroids to registers (broadcast from __constant__ = fast, divergent reads later = fast)
+    float ct[4];
+#pragma unroll
+    for (int i = 0; i < 4; ++i) ct[i] = TURBO_CENTROIDS_2BIT[i];
+
     float sum = 0.0f;
+    int prev_blk = -1;
+    float sc[4];
 
 #pragma unroll
     for (int k0 = 0; k0 < D/2; k0 += nthreads*cpy_ne) {
         const int base = k0 + (nthreads == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads)*cpy_ne;
+        const int elem0 = base * 2;
+        const int blk   = elem0 / QK_TURBO2;
+        const int qs_byte = (elem0 % QK_TURBO2) / 4;  // 4 elements per byte for 2-bit
+
+        if (blk != prev_blk) {
+            const float norm = __half2float(K_blk[blk].norm);
+#pragma unroll
+            for (int i = 0; i < 4; ++i) sc[i] = ct[i] * norm;
+            prev_blk = blk;
+        }
+
+        // cpy_ne=4 pairs = 8 elements @ 2 bits = 16 bits = 2 bytes
+        uint16_t packed;
+        memcpy(&packed, &K_blk[blk].qs[qs_byte], sizeof(uint16_t));
+
 #pragma unroll
         for (int k1 = 0; k1 < cpy_ne; ++k1) {
-            const int pair = base + k1;
-            const int elem = pair * 2;
-            const int blk  = elem / QK_TURBO2;
-            const int j    = elem % QK_TURBO2;
-            const float norm = __half2float(K_blk[blk].norm);
-            const float v0 = turbo2_dequant_element(&K_blk[blk], j,     norm);
-            const float v1 = turbo2_dequant_element(&K_blk[blk], j + 1, norm);
+            const uint32_t shift = k1 * 4;  // 2 bits × 2 elements = 4 bits per pair
+            const float v0 = sc[(packed >> shift) & 0x3];
+            const float v1 = sc[(packed >> (shift + 2)) & 0x3];
             const float2 Q_val = ((const float2 *) Q_v)[k0/nthreads + k1];
             sum += v0 * Q_val.x + v1 * Q_val.y;
         }
@@ -581,20 +601,44 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_turbo3(
     constexpr int cpy_nb = ggml_cuda_get_max_cpy_bytes();
     constexpr int cpy_ne = cpy_nb / 4;
 
+    float ct[8];
+#pragma unroll
+    for (int i = 0; i < 8; ++i) ct[i] = TURBO_CENTROIDS_3BIT[i];
+
     float sum = 0.0f;
+    int prev_blk = -1;
+    float sc[8];
 
 #pragma unroll
     for (int k0 = 0; k0 < D/2; k0 += nthreads*cpy_ne) {
         const int base = k0 + (nthreads == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads)*cpy_ne;
+        const int elem0 = base * 2;
+        const int blk   = elem0 / QK_TURBO3;
+        const int qs_byte   = (elem0 % QK_TURBO3) / 4;  // 4 elements per qs byte (lower 2 bits)
+        const int sign_byte = (elem0 % QK_TURBO3) / 8;  // 8 elements per signs byte (upper 1 bit)
+
+        if (blk != prev_blk) {
+            const float norm = __half2float(K_blk[blk].norm);
+#pragma unroll
+            for (int i = 0; i < 8; ++i) sc[i] = ct[i] * norm;
+            prev_blk = blk;
+        }
+
+        // cpy_ne=4 pairs = 8 elements: lower 2 bits in 2 qs bytes, upper 1 bit in 1 signs byte
+        uint16_t qs_packed;
+        memcpy(&qs_packed, &K_blk[blk].qs[qs_byte], sizeof(uint16_t));
+        const uint8_t signs = K_blk[blk].signs[sign_byte];
+
 #pragma unroll
         for (int k1 = 0; k1 < cpy_ne; ++k1) {
-            const int pair = base + k1;
-            const int elem = pair * 2;
-            const int blk  = elem / QK_TURBO3;
-            const int j    = elem % QK_TURBO3;
-            const float norm = __half2float(K_blk[blk].norm);
-            const float v0 = turbo3_dequant_element(&K_blk[blk], j,     norm);
-            const float v1 = turbo3_dequant_element(&K_blk[blk], j + 1, norm);
+            const uint32_t qs_shift = k1 * 4;        // 2 bits × 2 elements = 4 bits per pair
+            const uint32_t sign_bit0 = k1 * 2;       // element offsets within 8-element signs group
+            const uint32_t sign_bit1 = k1 * 2 + 1;
+
+            const uint8_t idx0 = ((qs_packed >> qs_shift) & 0x3) | (((signs >> sign_bit0) & 0x1) << 2);
+            const uint8_t idx1 = ((qs_packed >> (qs_shift + 2)) & 0x3) | (((signs >> sign_bit1) & 0x1) << 2);
+            const float v0 = sc[idx0];
+            const float v1 = sc[idx1];
             const float2 Q_val = ((const float2 *) Q_v)[k0/nthreads + k1];
             sum += v0 * Q_val.x + v1 * Q_val.y;
         }
@@ -614,20 +658,37 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_turbo4(
     constexpr int cpy_nb = ggml_cuda_get_max_cpy_bytes();
     constexpr int cpy_ne = cpy_nb / 4;
 
+    float ct[16];
+#pragma unroll
+    for (int i = 0; i < 16; ++i) ct[i] = TURBO_CENTROIDS_4BIT[i];
+
     float sum = 0.0f;
+    int prev_blk = -1;
+    float sc[16];
 
 #pragma unroll
     for (int k0 = 0; k0 < D/2; k0 += nthreads*cpy_ne) {
         const int base = k0 + (nthreads == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads)*cpy_ne;
+        const int elem0 = base * 2;
+        const int blk   = elem0 / QK_TURBO4;
+        const int qs_byte = (elem0 % QK_TURBO4) / 2;  // 2 elements per byte for 4-bit
+
+        if (blk != prev_blk) {
+            const float norm = __half2float(K_blk[blk].norm);
+#pragma unroll
+            for (int i = 0; i < 16; ++i) sc[i] = ct[i] * norm;
+            prev_blk = blk;
+        }
+
+        // cpy_ne=4 pairs = 8 elements @ 4 bits = 32 bits = 4 bytes
+        uint32_t packed;
+        memcpy(&packed, &K_blk[blk].qs[qs_byte], sizeof(uint32_t));
+
 #pragma unroll
         for (int k1 = 0; k1 < cpy_ne; ++k1) {
-            const int pair = base + k1;
-            const int elem = pair * 2;
-            const int blk  = elem / QK_TURBO4;
-            const int j    = elem % QK_TURBO4;
-            const float norm = __half2float(K_blk[blk].norm);
-            const float v0 = turbo4_dequant_element(&K_blk[blk], j,     norm);
-            const float v1 = turbo4_dequant_element(&K_blk[blk], j + 1, norm);
+            const uint32_t shift = k1 * 8;  // 4 bits × 2 elements = 8 bits per pair
+            const float v0 = sc[(packed >> shift) & 0xF];
+            const float v1 = sc[(packed >> (shift + 4)) & 0xF];
             const float2 Q_val = ((const float2 *) Q_v)[k0/nthreads + k1];
             sum += v0 * Q_val.x + v1 * Q_val.y;
         }
