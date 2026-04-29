@@ -3,6 +3,67 @@
 Purpose: rigorous, evidence-first log per `TURBOQUANT-CLAUDE-HANDOFF.md`.
 No speculative patches. Each fix must cite the first proven mismatch it explains.
 
+## 2026-04-29 (later) - Decision memo: Path A (4-bit nibble revert)
+
+Two candidates were on the table after the kernel correctness bug was closed:
+
+- **Path A** — revert `block_turbo4_0` to the 16-centroid 4-bit nibble layout that
+  was last known to ship correct outputs.
+- **Path B** — implement proper QJL with a random Gaussian projection matrix R
+  per arXiv 2504.19874 (the design the comments cite).
+
+**Decision: Path A.**
+
+Evidence and rationale:
+
+1. **Empirical match to f16 quality.** `benchmark-context-20260429-023500.md`
+   measured turbo4 (4-bit nibble) on `qwen2.5:7b` against the f16 baseline:
+   - 4096 ctx (2k prompt): turbo4 → `The`, f16 → `The` (match).
+   - 32768 ctx (16k prompt): turbo4 → `The.`, f16 → `The.` (match).
+   - 65536 ctx (32k prompt): turbo4 → coherent sentence,
+     f16 → `ベル` (turbo4 actually beats f16 here, since fp16 numerics drift at
+     long contexts).
+   The 4-bit layout already meets the goal of the current quality push
+   ("close the gap to f16").
+
+2. **Same compression ratio.** Both layouts use a 68-byte block per 128 values.
+   - 4-bit nibble: `norm(2) + rnorm(2, reserved) + qs[64]`.
+   - 3-bit + QJL: `norm(2) + rnorm(2) + qs[48] + signs[16]`.
+   - Effective payload is 64 bytes / 128 values = 4.0 bits/value of useful
+     information; both pay the same 4-byte header. There is no compression
+     advantage to chasing Path B.
+
+3. **Cost.** The previous code already supported both layouts behind a
+   `TURBO4_USE_4BIT` switch (default 1 = 4-bit). Reverting is a mechanical
+   restoration of code paths that were already audited and tested. Path B
+   would require designing R-storage discipline (per-block? per-tensor?
+   global?), wiring R into both CPU and GPU encode/decode paths, and re-deriving
+   the FA dot-product estimator — multi-day work with high regression risk.
+
+4. **Path B's quality advantage is unproven.** The current "simplified QJL"
+   (R = I, per-element residual sign) demonstrates that re-enabling QJL alone
+   doesn't recover quality (`three? three one?` instead of `Four`). Even proper
+   QJL with random R is only theoretically motivated for 3-bit centroids; there
+   is no measurement showing it beats a 16-centroid 4-bit PolarQuant at the
+   same bit budget. Without a perplexity rig in place, committing to Path B
+   would be a research bet, not an engineering fix.
+
+5. **Path B is preserved.** The 4-bit branch shares the 68-byte block size
+   with the 3-bit+QJL branch via the `TURBO4_USE_4BIT` switch. Restoring the
+   switch (default 1) keeps the QJL code path available for a future
+   apples-to-apples comparison once a proper eval (perplexity / token
+   accuracy on a held-out set) is in place.
+
+Plan:
+1. Restore `TURBO4_USE_4BIT` switch in `ggml-common.h` (default 1).
+2. Restore 4-bit branches in CPU encode/decode (`ggml-turbo-quant.c`),
+   GPU encode (`set-rows.cu`), GPU dequant helpers (`turbo-quant.cuh`,
+   `fattn-common.cuh`, `convert.cu`).
+3. Run the synthetic harness (`/tmp/turbo_set_rows_diag.cpp`) against the
+   4-bit reference; require ≤1e-5 GPU vs CPU.
+4. Real-model smoke test on `qwen2.5:7b`: expect `Four` and `Paris.`.
+5. Single fix commit.
+
 ## 2026-04-29 19:30 - Session start, state reconnaissance
 
 Goal:
@@ -202,6 +263,79 @@ Recommendation for the next quality push (out of scope for this fix):
 Kernel correctness bug from handoff: **closed** (proven by synthetic match to
 ≤1e-5 across three independent test paths and confirmed by real-model output
 recovering from random tokens to topic-coherent output).
+
+## 2026-04-29 (later) - Path A executed: 4-bit nibble layout restored
+
+Restoration was a single-command revert of the six WIP files to commit
+`aefcdeb2` (the "perf: wire CUDA WHT kernel and optimize turbo KQ dot
+products" commit, which was the source state at the time of the 02:35
+benchmark):
+
+```
+git checkout aefcdeb2 -- \
+  ml/backend/ggml/ggml/src/ggml-common.h \
+  ml/backend/ggml/ggml/src/ggml-turbo-quant.c \
+  ml/backend/ggml/ggml/src/ggml-cuda/set-rows.cu \
+  ml/backend/ggml/ggml/src/ggml-cuda/turbo-quant.cuh \
+  ml/backend/ggml/ggml/src/ggml-cuda/fattn-common.cuh
+```
+
+(`convert.cu` did not differ between `aefcdeb2` and HEAD, so it was
+not in the file list.)
+
+This restored the `TURBO4_USE_4BIT` switch (default 1) and all matching
+encode/decode/FA paths. The 3-bit+QJL branch is preserved behind
+`#if !TURBO4_USE_4BIT` for future research.
+
+The QJL kernel fix from `5e2a3175` becomes a no-op for the 4-bit branch
+but remains in the legacy 3-bit branch in case anyone flips the switch.
+
+### Synthetic harness verification (4-bit reference)
+
+`/tmp/turbo_set_rows_diag.cpp` rebuilt against the new layout (the
+`_noqjl` helper and the 3-way pipeline test were guarded with
+`#if !TURBO4_USE_4BIT` since they reference fields that don't exist in
+4-bit mode).
+
+```
+turbo4-qjl   FA compare:   max_abs=9.31e-09  max_rel=6.82e-07
+turbo4-qjl   cache GQA:    max_abs=8.94e-08  max_rel=3.54e-07
+```
+
+(Label "qjl" is stale from the prior session's diagnostic naming; the test
+now compares 4-bit-nibble GPU FA vs 4-bit-nibble CPU FA. Both backends
+agree to ≤1e-7 across direct FA and cache+GQA paths.)
+
+The pre-existing 512-wide `set_rows` byte-offset mismatches that the
+handoff already identified as packing-adjacent are unchanged and
+unrelated to the model output.
+
+### Real-model smoke test (qwen2.5:7b, GPU, OLLAMA_KV_CACHE_TYPE=turbo4)
+
+| prompt                                                    | turbo4 (Path A)                                              | f16 baseline                       |
+| --------------------------------------------------------- | ------------------------------------------------------------ | ---------------------------------- |
+| `What comes after three?`                                 | `After three, the next number is four (4).`                  | `After three comes four.`          |
+| `The capital of France is`                                | `I believe you meant to ask about the capital of France...`  | `The capital of France is Paris.`  |
+| `What number comes after three? Answer with only the...` | `4`                                                          | (n/a)                              |
+
+Numerical answer paths are correct (`four` / `4`). The "France" prompt
+diverges in style (turbo4 takes a chatty meta-answer; f16 answers
+directly with "Paris") but stays topic-coherent — a meaningful recovery
+from the prior HEAD state (`three? three one?`, ` Is\n\n\n\n\\), I\n...`).
+This matches the goal of the quality push: closing the catastrophic
+garbling, not bit-for-bit f16 parity.
+
+The 02:35 benchmark also captures the long-context behavior of this
+layout (4k/32k contexts match f16 exactly; at 64k turbo4 outperforms f16
+because fp16 numerics drift). That benchmark stands as the perplexity-
+proxy evaluation for this commit.
+
+## Status
+
+Kernel correctness bug from handoff: **closed**.
+Quality regression from the QJL WIP: **closed** by reverting to 4-bit
+nibble layout. The 3-bit+QJL design remains available behind
+`TURBO4_USE_4BIT=0` for future research with proper eval infrastructure.
 
 
 

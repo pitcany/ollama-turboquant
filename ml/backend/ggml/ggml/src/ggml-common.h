@@ -276,22 +276,34 @@ static_assert(sizeof(block_turbo3_0) == sizeof(ggml_half) + QK_TURBO3/4 + QK_TUR
 // TurboQuant 4-bit: 3-bit PolarQuant indices + 1-bit QJL signs
 // TURBO4_USE_4BIT: switch between 4-bit PolarQuant (new) and 3-bit+QJL (legacy)
 // Default: 4-bit on all backends (Metal + CUDA validated)
-// 3-bit PolarQuant + 1-bit QJL residual correction (arXiv 2504.19874)
-// Per block: norm(fp16) + rnorm(fp16) + 2-bit low indices (32 bytes)
-//            + 1-bit high indices (16 bytes) + 1-bit QJL signs (16 bytes)
-// = 68 bytes per 128 values = 4.25 bits/value -> 3.8x compression vs fp16
-// Uses 2+1 split packing (same as turbo3) for efficient GPU unpacking.
+#ifndef TURBO4_USE_4BIT
+#  define TURBO4_USE_4BIT 1
+#endif
 
 #define QK_TURBO4 128
 
+#if TURBO4_USE_4BIT
+// 4-bit PolarQuant: 16 optimal centroids, nibble packed, no QJL
+// Per block: norm(fp16) + rnorm(fp16, reserved) + 4-bit indices (64 bytes)
+// = 68 bytes per 128 values = 4.25 bits/value -> 3.8x compression vs fp16
 typedef struct {
-    ggml_half  norm;                    //  2 bytes: corrected L2 norm
-    ggml_half  rnorm;                   //  2 bytes: residual L2 norm (QJL scale)
-    uint8_t    qs[QK_TURBO4 / 4];      // 32 bytes: lower 2-bit indices (4 per byte)
-    uint8_t    qh[QK_TURBO4 / 8];      // 16 bytes: upper 1-bit of 3-bit index (8 per byte)
-    uint8_t    signs[QK_TURBO4 / 8];   // 16 bytes: QJL residual sign bits (8 per byte)
+    ggml_half  norm;                    //  2 bytes
+    ggml_half  rnorm;                   //  2 bytes (reserved, unused in 4-bit mode)
+    uint8_t    qs[QK_TURBO4 / 2];      // 64 bytes: 4-bit PolarQuant indices (nibble packed)
 } block_turbo4_0;                       // 68 bytes total
 static_assert(sizeof(block_turbo4_0) == 68, "wrong turbo4_0 block size");
+#else
+// Legacy 3-bit PolarQuant + 1-bit QJL (original paper design)
+// Per block: norm(fp16) + rnorm(fp16) + 3-bit indices (48 bytes) + 1-bit QJL signs (16 bytes)
+// = 68 bytes per 128 values = 4.25 bits/value -> 3.8x compression vs fp16
+typedef struct {
+    ggml_half  norm;                    //  2 bytes
+    ggml_half  rnorm;                   //  2 bytes: residual norm for QJL scale
+    uint8_t    qs[QK_TURBO4 * 3 / 8];  // 48 bytes: 3-bit PolarQuant indices
+    uint8_t    signs[QK_TURBO4 / 8];   // 16 bytes: 1-bit QJL signs
+} block_turbo4_0;                       // 68 bytes total
+static_assert(sizeof(block_turbo4_0) == 2*sizeof(ggml_half) + QK_TURBO4*3/8 + QK_TURBO4/8, "wrong turbo4_0 block size");
+#endif
 
 static_assert(QK_TURBO4 == 128, "turbo4 kernels assume QK_TURBO4 == 128");
 

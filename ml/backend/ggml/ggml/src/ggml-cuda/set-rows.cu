@@ -935,11 +935,11 @@ static void set_rows_cuda_turbo2(
     }
 }
 
-// ---- TurboQuant4 set_rows: 128-element groups with WHT rotation + 3-bit+QJL quantization ----
+// ---- TurboQuant4 set_rows: 128-element groups with WHT rotation + 4-bit quantization ----
 //
 // turbo4 block size IS the WHT group size (128), so 1 CUDA block = 1 turbo4 block.
 // 128 threads per block, thread j handles element j.
-// 3-bit centroid indices are split as lower 2 bits in qs[] and upper 1 bit in qh[].
+// 4-bit centroids (16 values), nibble packed: qs[j/2] |= (idx & 0xF) << ((j%2)*4)
 
 template <typename idx_t>
 __launch_bounds__(128)
@@ -1048,63 +1048,26 @@ static __global__ void k_set_rows_turbo4(
     x[j] = x[j] * inv_sqrt_128 * TURBO_WHT_SIGNS2[j];
     __syncthreads();
 
-    // ---- Step 5: Quantize element j to 3-bit centroid ----
+    // ---- Step 5: Quantize element j to 4-bit centroid ----
     const float rv = x[j];
-    const uint8_t idx = turbo_nearest_centroid_3bit(rv);
-    const float centroid = TURBO_CENTROIDS_3BIT[idx];
+    const uint8_t idx = turbo_nearest_centroid_4bit(rv);
 
-    // ---- Step 6: Compute residual and its sign (QJL Stage 2) ----
-    const float residual = rv - centroid;
-
-    // Parallel residual L2 norm (same warp reduction pattern as Step 2)
-    float r2 = residual * residual;
-    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1)
-        r2 += __shfl_xor_sync(0xffffffff, r2, offset);
-    if (j % WARP_SIZE == 0)
-        warp_accum[j / WARP_SIZE] = r2;
-    __syncthreads();
-
-    __shared__ float s_resid_sq;
-    if (j == 0) {
-        float total = 0.0f;
-        for (int w = 0; w < n_warps; w++) total += warp_accum[w];
-        s_resid_sq = total;
+    // ---- Step 6: Pack qs (nibble packed, warp-cooperative) ----
+    // 2 elements per byte, 4 bits each.
+    // Thread pairs (j, j+1) share a qs byte.
+    const int lane = j % WARP_SIZE;
+    const uint8_t my_nibble = idx & 0xF;
+    uint8_t qs_byte = 0;
+    // Gather nibble from partner thread
+    uint8_t partner_nibble = __shfl_sync(0xffffffff, my_nibble, lane ^ 1);
+    if (j % 2 == 0) {
+        qs_byte = my_nibble | (partner_nibble << 4);
+        blk->qs[j / 2] = qs_byte;
     }
-    __syncthreads();
-    const float residual_norm = sqrtf(s_resid_sq);
 
-    // ---- Step 7: Pack 3-bit indices (2+1 split) + QJL signs ----
-    // Store quantized value and sign in shared memory for thread 0 to pack sequentially.
-    // (Uses the proven sequential packing from quantize_f32_turbo4_0_block pattern.)
-    __shared__ uint8_t s_idx[128];
-    __shared__ uint8_t s_sign[128];
-    s_idx[j]  = idx;
-    s_sign[j] = (residual >= 0.0f) ? 1 : 0;
-    __syncthreads();
-
-    if (j == 0) {
-        for (int i = 0; i < QK_TURBO4 / 4; ++i) {
-            blk->qs[i] = 0;
-        }
-        for (int i = 0; i < QK_TURBO4 / 8; ++i) {
-            blk->qh[i] = 0;
-            blk->signs[i] = 0;
-        }
-        for (int i = 0; i < QK_TURBO4; i++) {
-            uint8_t ix = s_idx[i];
-            blk->qs[i / 4] |= (ix & 0x3) << ((i % 4) * 2);
-            if (ix & 0x4) {
-                blk->qh[i / 8] |= (1 << (i % 8));
-            }
-            if (s_sign[i]) {
-                blk->signs[i / 8] |= (1 << (i % 8));
-            }
-        }
-    }
-    __syncthreads();
-
-    // ---- Step 8: Reconstruction norm correction (parallel) ----
-    float rc = centroid * centroid;
+    // ---- Step 7: Reconstruction norm (parallel) ----
+    const float c = TURBO_CENTROIDS_4BIT[idx];
+    float rc = c * c;
     for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1)
         rc += __shfl_xor_sync(0xffffffff, rc, offset);
     if (j % WARP_SIZE == 0)
@@ -1121,10 +1084,10 @@ static __global__ void k_set_rows_turbo4(
     const float recon_norm     = sqrtf(s_recon_sq);
     const float corrected_norm = (recon_norm > 1e-10f) ? grp_norm / recon_norm : grp_norm;
 
-    // ---- Step 9: Write norms ----
+    // ---- Step 8: Write corrected norm and zero rnorm (one thread) ----
     if (j == 0) {
         blk->norm  = __float2half(corrected_norm);
-        blk->rnorm = __float2half(residual_norm);
+        blk->rnorm = __float2half(0.0f);
     }
 
     GGML_UNUSED(ne10);
