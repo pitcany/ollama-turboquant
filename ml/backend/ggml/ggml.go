@@ -5,9 +5,11 @@ package ggml
 // #cgo CPPFLAGS: -I${SRCDIR}/ggml/include
 // #include <stdlib.h>
 // #include <stdint.h>
+// #include <stdbool.h>
 // #include "ggml.h"
 // #include "ggml-cpu.h"
 // #include "ggml-backend.h"
+// extern bool turboQuantEvalCallback(struct ggml_tensor * t, bool ask, void * user_data);
 import "C"
 
 import (
@@ -20,7 +22,9 @@ import (
 	"log/slog"
 	"maps"
 	"os"
+	"path/filepath"
 	"runtime"
+	"runtime/cgo"
 	"slices"
 	"strconv"
 	"strings"
@@ -822,9 +826,16 @@ func (c *Context) ComputeWithNotify(cb func(), tensors ...ml.Tensor) {
 		C.ggml_backend_sched_set_batch_size(c.b.sched, C.int(c.batchSize))
 	}
 
-	if status := C.ggml_backend_sched_graph_compute_async(c.b.sched, c.graph); status != C.GGML_STATUS_SUCCESS {
+	dumpHandle := installTurboQuantDumpCallback(c.b.sched)
+	status := C.ggml_backend_sched_graph_compute_async(c.b.sched, c.graph)
+	if dumpHandle != nil {
+		dumpHandle.close(c.b.sched)
+	}
+
+	if status != C.GGML_STATUS_SUCCESS {
 		panic(fmt.Errorf("error computing ggml graph: %v", status))
 	}
+
 	C.ggml_backend_sched_reset(c.b.sched)
 
 	needSync := true
@@ -840,6 +851,153 @@ func (c *Context) ComputeWithNotify(cb func(), tensors ...ml.Tensor) {
 			t.(*Tensor).sync = sync
 		}
 	}
+}
+
+var turboQuantDumpSeq atomic.Uint64
+
+type turboQuantDumpConfig struct {
+	dir           string
+	limit         int
+	includePacked bool
+	includeAllF32 bool
+}
+
+type turboQuantDumpHandle struct {
+	handle cgo.Handle
+}
+
+func installTurboQuantDumpCallback(sched C.ggml_backend_sched_t) *turboQuantDumpHandle {
+	dir := os.Getenv("OLLAMA_TURBOQUANT_DUMP_DIR")
+	if dir == "" {
+		return nil
+	}
+
+	limit := 256
+	if s := os.Getenv("OLLAMA_TURBOQUANT_DUMP_LIMIT"); s != "" {
+		if v, err := strconv.Atoi(s); err == nil {
+			limit = v
+		}
+	}
+
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		slog.Warn("failed to create turboquant dump directory", "dir", dir, "error", err)
+		return nil
+	}
+
+	cfg := &turboQuantDumpConfig{
+		dir:           dir,
+		limit:         limit,
+		includePacked: os.Getenv("OLLAMA_TURBOQUANT_DUMP_PACKED") == "1",
+		includeAllF32: os.Getenv("OLLAMA_TURBOQUANT_DUMP_ALL_F32") == "1",
+	}
+
+	handle := cgo.NewHandle(cfg)
+	C.ggml_backend_sched_set_eval_callback(
+		sched,
+		C.ggml_backend_sched_eval_callback(C.turboQuantEvalCallback),
+		unsafe.Pointer(uintptr(handle)),
+	)
+
+	return &turboQuantDumpHandle{handle: handle}
+}
+
+func (h *turboQuantDumpHandle) close(sched C.ggml_backend_sched_t) {
+	C.ggml_backend_sched_set_eval_callback(sched, nil, nil)
+	h.handle.Delete()
+}
+
+//export turboQuantEvalCallback
+func turboQuantEvalCallback(t *C.struct_ggml_tensor, ask C.bool, userData unsafe.Pointer) C.bool {
+	cfg, ok := cgo.Handle(uintptr(userData)).Value().(*turboQuantDumpConfig)
+	if !ok {
+		return C.bool(false)
+	}
+
+	if bool(ask) {
+		return C.bool(shouldDumpTurboQuantNode(t, cfg.includePacked, cfg.includeAllF32))
+	}
+
+	return C.bool(dumpTurboQuantTensor(cfg.dir, cfg.limit, -1, "out", t))
+}
+
+func dumpTurboQuantTensor(dir string, limit int, graphNode int, tag string, tensor *C.struct_ggml_tensor) bool {
+	seq := turboQuantDumpSeq.Load()
+	if limit >= 0 && int(seq) >= limit {
+		return false
+	}
+	seq = turboQuantDumpSeq.Add(1) - 1
+
+	nbytes := int(C.ggml_nbytes(tensor))
+	if nbytes == 0 {
+		return true
+	}
+
+	data := make([]byte, nbytes)
+	C.ggml_backend_tensor_get(tensor, unsafe.Pointer(&data[0]), 0, C.size_t(nbytes))
+
+	opName := C.GoString(C.ggml_op_name(tensor.op))
+	typeName := C.GoString(C.ggml_type_name(tensor._type))
+	name := C.GoString(C.ggml_get_name(tensor))
+	nodeLabel := "node_unknown"
+	if graphNode >= 0 {
+		nodeLabel = fmt.Sprintf("node%04d", graphNode)
+	}
+	base := fmt.Sprintf("%06d_%s_%s_%s_%s", seq, nodeLabel, sanitizeDumpName(tag), sanitizeDumpName(opName), sanitizeDumpName(typeName))
+
+	binPath := filepath.Join(dir, base+".bin")
+	if err := os.WriteFile(binPath, data, 0o644); err != nil {
+		slog.Warn("failed to write turboquant dump", "path", binPath, "error", err)
+		return true
+	}
+
+	meta := fmt.Sprintf(
+		"seq=%d\nnode=%d\ntag=%s\nop=%s\ntype=%s\nname=%s\nnbytes=%d\nne=%d,%d,%d,%d\nnb=%d,%d,%d,%d\nop_params=%d,%d,%d,%d,%d,%d,%d,%d\n",
+		seq, graphNode, tag, opName, typeName, name, nbytes,
+		int64(tensor.ne[0]), int64(tensor.ne[1]), int64(tensor.ne[2]), int64(tensor.ne[3]),
+		uint64(tensor.nb[0]), uint64(tensor.nb[1]), uint64(tensor.nb[2]), uint64(tensor.nb[3]),
+		int32(tensor.op_params[0]), int32(tensor.op_params[1]), int32(tensor.op_params[2]), int32(tensor.op_params[3]),
+		int32(tensor.op_params[4]), int32(tensor.op_params[5]), int32(tensor.op_params[6]), int32(tensor.op_params[7]),
+	)
+	metaPath := filepath.Join(dir, base+".txt")
+	if err := os.WriteFile(metaPath, []byte(meta), 0o644); err != nil {
+		slog.Warn("failed to write turboquant dump metadata", "path", metaPath, "error", err)
+	}
+
+	return true
+}
+
+func shouldDumpTurboQuantNode(node *C.struct_ggml_tensor, includePacked bool, includeAllF32 bool) bool {
+	if includeAllF32 && node._type == C.GGML_TYPE_F32 {
+		return true
+	}
+
+	switch node.op {
+	case C.GGML_OP_TURBO_WHT, C.GGML_OP_FLASH_ATTN_EXT:
+		return true
+	case C.GGML_OP_SET_ROWS:
+		return includePacked && isTurboQuantType(node._type)
+	default:
+		return false
+	}
+}
+
+func isTurboQuantType(t C.enum_ggml_type) bool {
+	return t == C.GGML_TYPE_TURBO2_0 || t == C.GGML_TYPE_TURBO3_0 || t == C.GGML_TYPE_TURBO4_0
+}
+
+func sanitizeDumpName(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '-' || r == '.' {
+			b.WriteRune(r)
+			continue
+		}
+		b.WriteByte('_')
+	}
+	if b.Len() == 0 {
+		return "unnamed"
+	}
+	return b.String()
 }
 
 func (c *Context) Reserve() {

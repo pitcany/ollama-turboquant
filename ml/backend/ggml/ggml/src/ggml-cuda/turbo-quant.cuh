@@ -331,24 +331,43 @@ static __device__ __forceinline__ uint8_t turbo_nearest_centroid_4bit(float val)
     else                               return 15;
 }
 
-// ---- Per-block quantize for turbo4 (128 elements, expects already-rotated input) ----
+// Forward declaration (defined below turbo3 section)
+static __device__ __forceinline__ uint8_t turbo_nearest_centroid_3bit(float val);
+
+// ---- Per-block quantize for turbo4 (128 elements, 3-bit+QJL, expects already-rotated input) ----
+// Uses 2+1 split: lower 2 bits in qs[], upper 1 bit in qh[], QJL signs in signs[]
 
 static __device__ void quantize_f32_turbo4_0_block(const float * __restrict__ src,
                                                     block_turbo4_0 * __restrict__ dst) {
-    for (int j = 0; j < QK_TURBO4 / 2; j++) dst->qs[j] = 0;
+    for (int j = 0; j < QK_TURBO4 / 4; j++) dst->qs[j] = 0;
+    for (int j = 0; j < QK_TURBO4 / 8; j++) dst->qh[j] = 0;
 
     for (int j = 0; j < QK_TURBO4; j++) {
-        uint8_t idx = turbo_nearest_centroid_4bit(src[j]);
-        dst->qs[j / 2] |= (idx & 0xF) << ((j % 2) * 4);
+        uint8_t idx = turbo_nearest_centroid_3bit(src[j]);
+        dst->qs[j / 4] |= (idx & 0x3) << ((j % 4) * 2);
+        if (idx & 0x4) {
+            dst->qh[j / 8] |= (1 << (j % 8));
+        }
     }
 }
 
-// ---- Inline dequant helper: extract one float from turbo4 block ----
+// ---- Inline dequant helper: extract one float from turbo4 block (3-bit + QJL) ----
+
+static constexpr float TURBO4_INV_SQRT_D = 0.08838834764831845f;  // 1/sqrt(128)
 
 static __device__ __forceinline__ float turbo4_dequant_element(
         const block_turbo4_0 * __restrict__ x, int j, float norm) {
-    uint8_t idx = (x->qs[j / 2] >> ((j % 2) * 4)) & 0xF;
-    return TURBO_CENTROIDS_4BIT[idx] * norm;
+    uint8_t low2 = (x->qs[j / 4] >> ((j % 4) * 2)) & 0x3;
+    uint8_t hi1  = (x->qh[j / 8] >> (j % 8)) & 0x1;
+    uint8_t idx  = low2 | (hi1 << 2);
+    // QJL stage 2: residual sign correction. Encoder writes signs[i]=1 iff
+    // (rotated[i] - centroid[idx[i]]) >= 0; decoder applies sign * rnorm/sqrt(d).
+    // Synthetic pipeline test (TURBOQUANT-DEBUG-LOG.md, 20:35): without this term the
+    // single-layer attention error is 0.0110 vs 0.0075 with QJL — over 28 layers the
+    // no-QJL error compounds to garbled output (qwen2.5:7b returned " words" / " DevComponents").
+    const float rnorm = __half2float(x->rnorm);
+    const float sign  = (x->signs[j / 8] & (1 << (j % 8))) ? 1.0f : -1.0f;
+    return TURBO_CENTROIDS_3BIT[idx] * norm + sign * rnorm * TURBO4_INV_SQRT_D;
 }
 
 // ---- Nearest 3-bit centroid index ----
