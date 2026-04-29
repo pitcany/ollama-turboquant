@@ -73,15 +73,39 @@ CGO_LDFLAGS="-L$(pwd)/build/lib/ollama" \
   -ldflags='-extldflags "-Wl,--version-script=hide-ggml.ver"' \
   -o ollama-tq .
 
-# 4b. Install
+# 4. Install binary + library symlink
 cp ollama-tq ~/.local/bin/ollama-tq
+# Ollama discovers backends at <exe_dir>/../lib/ollama/ — symlink to build output:
+ln -sfn "$(pwd)/build/lib/ollama" ~/.local/lib/ollama
 
-# 4. Test
+# 5. Test (ad-hoc, uses a separate port)
 pkill -f 'ollama-tq'  # kill ALL previous instances
 CUDA_VISIBLE_DEVICES=0 OLLAMA_HOST=localhost:9999 \
   OLLAMA_KV_CACHE_TYPE=turbo4 OLLAMA_FLASH_ATTENTION=1 \
   OLLAMA_NEW_ENGINE=1 OLLAMA_CONTEXT_LENGTH=4096 \
-  ./ollama-tq serve
+  ~/.local/bin/ollama-tq serve
+```
+
+## Systemd Service
+
+The `ollama-tq` systemd service runs TurboQuant on port 8001:
+
+```bash
+# Service file: /etc/systemd/system/ollama-tq.service
+# Launch script: ~/.local/bin/ollama-serve-tq
+# Binary: ~/.local/bin/ollama-tq
+# Libraries: ~/.local/lib/ollama → ~/Work/ollama-build/build/lib/ollama (symlink)
+
+sudo systemctl start ollama-tq       # start
+sudo systemctl status ollama-tq      # check
+journalctl -u ollama-tq -f           # logs
+OLLAMA_HOST=localhost:8001 ollama ps  # verify GPU offloading
+```
+
+After rebuilding, install and restart:
+```bash
+cp ollama-tq ~/.local/bin/ollama-tq
+sudo systemctl restart ollama-tq
 ```
 
 ## Diagnosis Steps for the GPU SIGABRT
