@@ -3,7 +3,7 @@
 # Usage: ./benchmark-tq.sh
 set -euo pipefail
 
-OLLAMA_BIN="./ollama-tq-test"
+OLLAMA_BIN="./ollama-tq"
 PORT=9997
 HOST="localhost:$PORT"
 RESULTS_FILE="benchmark-results-$(date +%Y%m%d-%H%M%S).md"
@@ -39,7 +39,7 @@ wait_for_server() {
 }
 
 stop_server() {
-    pkill -f "ollama-tq-test.*serve" 2>/dev/null || true
+    pkill -f "ollama-tq.*serve" 2>/dev/null || true
     sleep 2
 }
 

@@ -71,14 +71,17 @@ go clean -cache  # ALWAYS clean before build — stale CGo cache causes crashes
 CGO_LDFLAGS="-L$(pwd)/build/lib/ollama" \
   go build -trimpath -buildmode=pie \
   -ldflags='-extldflags "-Wl,--version-script=hide-ggml.ver"' \
-  -o ollama-tq-test .
+  -o ollama-tq .
+
+# 4b. Install
+cp ollama-tq ~/.local/bin/ollama-tq
 
 # 4. Test
-pkill -f 'ollama-tq-test'  # kill ALL previous instances
+pkill -f 'ollama-tq'  # kill ALL previous instances
 CUDA_VISIBLE_DEVICES=0 OLLAMA_HOST=localhost:9999 \
   OLLAMA_KV_CACHE_TYPE=turbo4 OLLAMA_FLASH_ATTENTION=1 \
   OLLAMA_NEW_ENGINE=1 OLLAMA_CONTEXT_LENGTH=4096 \
-  ./ollama-tq-test serve
+  ./ollama-tq serve
 ```
 
 ## Diagnosis Steps for the GPU SIGABRT
@@ -137,7 +140,7 @@ cmake --build build -j$(nproc)
 CUDA_VISIBLE_DEVICES=0 OLLAMA_HOST=localhost:9999 \
   OLLAMA_KV_CACHE_TYPE=turbo4 OLLAMA_FLASH_ATTENTION=1 \
   OLLAMA_NEW_ENGINE=1 OLLAMA_CONTEXT_LENGTH=4096 \
-  ./ollama-tq-test serve 2>&1 | grep "TURBO DEBUG"
+  ./ollama-tq serve 2>&1 | grep "TURBO DEBUG"
 ```
 
 ### Step 5: Apply the fix based on findings
