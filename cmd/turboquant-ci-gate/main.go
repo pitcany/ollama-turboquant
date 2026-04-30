@@ -10,9 +10,12 @@ import (
 	"strings"
 )
 
+// Phase 0 quality budget. See tools/turboquant/README.md "CI Quality Gate"
+// for the rationale, headroom calculations, and signoff process. These
+// constants are pinned by TestDefaultThresholdsArePinned.
 const (
 	defaultMaxMeanKL             = 0.05
-	defaultMaxPerplexityDriftRel = 0.10
+	defaultMaxPerplexityDriftRel = 0.05
 )
 
 type gateOptions struct {

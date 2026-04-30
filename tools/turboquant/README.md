@@ -192,22 +192,95 @@ go run ./cmd/turboquant-ci-gate \
   -baseline /tmp/turboquant-phase0-f16.json \
   -candidate /tmp/turboquant-phase0-kq8-vturbo4.json \
   -max-mean-kl 0.05 \
-  -max-perplexity-drift 0.10
+  -max-perplexity-drift 0.05
 ```
 
 `make turboquant-phase0` writes `/tmp/turboquant-phase0-f16.json` and
 `/tmp/turboquant-phase0-kq8-vturbo4.json` using `cmd/turboquant-eval` with
 `-engine go`, `-limit 4`, and `-reference-kv-cache-type f16`. The gate fails
-if the candidate `mean_kl` is greater than `0.05` or if relative perplexity
-drift `(candidate_perplexity - f16_perplexity) / f16_perplexity` is greater
-than `0.10`. Missing `mean_kl` is also a failure because it usually means the
-eval was not run with an f16 reference context.
+if the candidate `mean_kl` exceeds the documented budget (see below) or if
+relative perplexity drift
+`(candidate_perplexity - f16_perplexity) / f16_perplexity` exceeds the
+documented budget. Missing `mean_kl` is also a failure because it usually
+means the eval was not run with an f16 reference context.
 
-To bump the quality budget, update the `-max-mean-kl` or
-`-max-perplexity-drift` flags in `.github/workflows/turboquant-phase0.yml`
-and update this section in the same change. Treat threshold bumps as quality
-policy changes: explain why the wider budget is acceptable and link the
-supporting measurements from `TURBOQUANT-DEBUG-LOG.md`.
+#### Quality budget
+
+These thresholds are pinned both in `cmd/turboquant-ci-gate` defaults
+(`defaultMaxMeanKL`, `defaultMaxPerplexityDriftRel`) and in
+`.github/workflows/turboquant-phase0.yml`. A test in
+`cmd/turboquant-ci-gate/main_test.go` (`TestDefaultThresholdsArePinned`)
+fails if either default drifts from the documented value, so a code-only
+change cannot silently widen the budget.
+
+| preset | metric | measured (256-seq) | budget | headroom |
+|---|---|---:|---:|---:|
+| `kq8-vturbo4` | `mean_kl` vs f16 | 0.01706 | **0.05** | 2.93x |
+| `kq8-vturbo4` | relative perplexity drift | 0.0080 (0.80%) | **0.05** | 6.25x |
+| `qwen2.5-7b-q4km-adaptive` | `mean_kl` vs f16 | 0.04249 | **0.13** | 3.06x |
+| `qwen2.5-7b-q4km-adaptive` | relative perplexity drift | 0.0207 (2.07%) | **0.05** | 2.42x |
+
+Rationale:
+
+1. **`kq8-vturbo4` mean_kl = 0.05.** The 256-sequence Phase 0 measurement
+   on Qwen2.5 7B Q4_K_M is 0.01706. A 3x headroom budget would be 0.0512;
+   we round down to 0.05 so a code regression that doubles KL still passes
+   while a regression that triples it fails. The kq8-vturbo4 preset is the
+   conservative model-agnostic safe split, so we want this gate to be the
+   tightest in the budget.
+
+2. **Adaptive preset mean_kl = 0.13.** The bundled
+   `qwen2.5-7b-q4km-adaptive` preset trades higher KL for materially less
+   KV-cache memory (71.8% savings vs 61.7%). Its 256-sequence measurement
+   is 0.04249. 3x headroom is 0.1275; we round to 0.13 so the adaptive
+   preset has the same ~3x error margin as kq8-vturbo4. Adaptive is not
+   yet run on every CI invocation, but pinning the budget here lets us
+   add a `-candidate /tmp/turboquant-phase0-adaptive.json` step under
+   the same gate without re-debating the threshold.
+
+3. **Relative perplexity drift = 0.05.** Both presets sit well under 5%
+   drift on the 256-sequence corpus (0.80% and 2.07% respectively). 5% is
+   a well-known rule-of-thumb for "quantization is still usable" on
+   English perplexity benchmarks, and it gives kq8-vturbo4 ~6x headroom
+   and adaptive ~2.4x headroom. Tighter would risk false positives from
+   stochastic batch ordering on a 4-sequence CI slice; looser would let
+   silently broken Turbo paths pass.
+
+4. **Retry policy.** The CUDA self-hosted runner can flake (driver
+   stalls, OOM from a noisy neighbor). The workflow allows **one**
+   automatic re-run via GitHub Actions' "Re-run failed jobs". Operators
+   should treat the second failure as a real regression and not re-run
+   again. If the first run fails and the re-run passes, the operator
+   files an issue tagged `turboquant-flake` with the `mean_kl` and
+   perplexity from both runs so we can decide whether to widen the
+   budget or harden the runner. We deliberately do not configure
+   `continue-on-error` or in-workflow retry loops, because both would
+   hide real quality drift.
+
+5. **Manifest artifact updates.** Any change under
+   `tools/turboquant/calibration/manifest_data/` (the bundled adaptive
+   presets) must trigger a fresh full-gate run before the PR can merge:
+
+   - The PR author runs `make turboquant-phase0` against the new
+     artifact and pastes the resulting `mean_kl`, `perplexity`, and
+     `duration` for both f16 baseline and the new artifact in the PR
+     description.
+   - For larger swings, the author also posts the 256-sequence numbers
+     so the budget table above can be revisited.
+   - A CODEOWNER for `tools/turboquant/calibration/manifest_data/` must
+     approve the PR explicitly. Self-merge is not allowed for manifest
+     changes even if other approvals are present.
+   - If the author needs to widen the budget to land the new artifact,
+     they update both this section and the defaults in
+     `cmd/turboquant-ci-gate/main.go` in the same commit, and the
+     `TestDefaultThresholdsArePinned` test must be updated to match.
+     Treat threshold bumps as quality policy changes and link the
+     supporting measurements from `TURBOQUANT-DEBUG-LOG.md`.
+
+Workflow status: the gate has been wired up but has not yet executed on
+a real CUDA runner. The next merge to `main` that touches
+`tools/turboquant/**` or `ml/backend/ggml/**` will be the first live
+exercise; treat that run as the calibration of the gate itself.
 
 ## Original Operator Guide
 

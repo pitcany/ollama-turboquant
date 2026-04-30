@@ -119,6 +119,31 @@ func TestGateRejectsInvalidThresholds(t *testing.T) {
 	}
 }
 
+// TestDefaultThresholdsArePinned guards the documented Phase 0 quality
+// budget. Bumping these values requires a matching update to the budget
+// table in tools/turboquant/README.md ("CI Quality Gate") and to the
+// -max-* flags in .github/workflows/turboquant-phase0.yml. See the
+// README section for the rationale and signoff process.
+func TestDefaultThresholdsArePinned(t *testing.T) {
+	if defaultMaxMeanKL != 0.05 {
+		t.Fatalf("defaultMaxMeanKL = %v, want 0.05 (see tools/turboquant/README.md CI Quality Gate)", defaultMaxMeanKL)
+	}
+	if defaultMaxPerplexityDriftRel != 0.05 {
+		t.Fatalf("defaultMaxPerplexityDriftRel = %v, want 0.05 (see tools/turboquant/README.md CI Quality Gate)", defaultMaxPerplexityDriftRel)
+	}
+
+	opts, err := parseGateFlags([]string{"-baseline", "b.json", "-candidate", "c.json"})
+	if err != nil {
+		t.Fatalf("parseGateFlags() error = %v", err)
+	}
+	if opts.MaxMeanKL != defaultMaxMeanKL {
+		t.Fatalf("parseGateFlags MaxMeanKL = %v, want %v", opts.MaxMeanKL, defaultMaxMeanKL)
+	}
+	if opts.MaxPerplexityDriftRel != defaultMaxPerplexityDriftRel {
+		t.Fatalf("parseGateFlags MaxPerplexityDriftRel = %v, want %v", opts.MaxPerplexityDriftRel, defaultMaxPerplexityDriftRel)
+	}
+}
+
 func writeEvalJSON(t *testing.T, name string, data string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), name)

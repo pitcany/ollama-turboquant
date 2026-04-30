@@ -36,12 +36,14 @@ jobs:
         run: make turboquant-phase0
 
       - name: Gate kq8-vturbo4 quality
+        # Thresholds match cmd/turboquant-ci-gate defaults and the budget
+        # documented in tools/turboquant/README.md "CI Quality Gate".
         run: |
           go run ./cmd/turboquant-ci-gate \
             -baseline /tmp/turboquant-phase0-f16.json \
             -candidate /tmp/turboquant-phase0-kq8-vturbo4.json \
             -max-mean-kl 0.05 \
-            -max-perplexity-drift 0.10
+            -max-perplexity-drift 0.05
 
       - name: Upload eval artifacts
         if: always()
