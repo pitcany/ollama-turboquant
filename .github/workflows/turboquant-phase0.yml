@@ -1,0 +1,52 @@
+name: TurboQuant Phase 0 Quality
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'tools/turboquant/**'
+      - 'ml/backend/ggml/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  phase0:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, cuda]
+    timeout-minutes: 45
+    env:
+      GOCACHE: /tmp/ollama-build-gocache
+      OLLAMA_NEW_ENGINE: '1'
+      OLLAMA_FLASH_ATTENTION: '1'
+      OLLAMA_LIBRARY_PATH: ${{ github.workspace }}/build/lib/ollama
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Run Phase 0 evals
+        run: make turboquant-phase0
+
+      - name: Gate kq8-vturbo4 quality
+        run: |
+          go run ./cmd/turboquant-ci-gate \
+            -baseline /tmp/turboquant-phase0-f16.json \
+            -candidate /tmp/turboquant-phase0-kq8-vturbo4.json \
+            -max-mean-kl 0.05 \
+            -max-perplexity-drift 0.10
+
+      - name: Upload eval artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: turboquant-phase0
+          path: /tmp/turboquant-phase0-*.json
+          if-no-files-found: ignore

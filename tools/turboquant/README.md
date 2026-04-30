@@ -178,6 +178,34 @@ across machines, it does not poll `nvidia-smi`, and it does not produce
 HTML reports. Drive it from a shell loop and pipe the JSON into your
 preferred analysis stack.
 
+### CI Quality Gate
+
+The opt-in Phase 0 CI scaffold runs the four-sequence Qwen2.5 7B snapshot on
+the CUDA self-hosted runner:
+
+```bash
+make turboquant-phase0
+go run ./cmd/turboquant-ci-gate \
+  -baseline /tmp/turboquant-phase0-f16.json \
+  -candidate /tmp/turboquant-phase0-kq8-vturbo4.json \
+  -max-mean-kl 0.05 \
+  -max-perplexity-drift 0.10
+```
+
+`make turboquant-phase0` writes `/tmp/turboquant-phase0-f16.json` and
+`/tmp/turboquant-phase0-kq8-vturbo4.json` using `cmd/turboquant-eval` with
+`-engine go`, `-limit 4`, and `-reference-kv-cache-type f16`. The gate fails
+if the candidate `mean_kl` is greater than `0.05` or if relative perplexity
+drift `(candidate_perplexity - f16_perplexity) / f16_perplexity` is greater
+than `0.10`. Missing `mean_kl` is also a failure because it usually means the
+eval was not run with an f16 reference context.
+
+To bump the quality budget, update the `-max-mean-kl` or
+`-max-perplexity-drift` flags in `.github/workflows/turboquant-phase0.yml`
+and update this section in the same change. Treat threshold bumps as quality
+policy changes: explain why the wider budget is acceptable and link the
+supporting measurements from `TURBOQUANT-DEBUG-LOG.md`.
+
 ## Original Operator Guide
 
 Two TurboQuant KV-cache modes are now first-class runtime configurations on the
