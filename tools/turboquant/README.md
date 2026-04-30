@@ -117,6 +117,8 @@ without ever running the model.
 When TurboQuant is configured but the active backend is not CUDA (Metal,
 ROCm, Vulkan, or CPU), the runner downgrades all Turbo* dtypes to `q8_0`
 and logs a warning. There is no silent garbage path.
+Embedding models do not use flash attention; when TurboQuant is configured,
+they fall back to the default f16 KV cache.
 
 ### Adding a calibration to the bundled manifest
 

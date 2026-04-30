@@ -1,15 +1,19 @@
 package llm
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 
 	"github.com/ollama/ollama/api"
 	"github.com/ollama/ollama/format"
+	"github.com/ollama/ollama/fs/ggml"
 	"github.com/ollama/ollama/ml"
+	"github.com/ollama/ollama/tools/turboquant/calibration"
 	"golang.org/x/sync/semaphore"
 )
 
@@ -31,6 +35,77 @@ func TestIsTurboquantAdaptiveSentinel(t *testing.T) {
 	}
 	if isTurboquantAdaptiveSentinel("turbo4") {
 		t.Fatal("turbo4 is not the adaptive sentinel")
+	}
+}
+
+func TestApplyEmbeddingTurboquantFallback(t *testing.T) {
+	embeddingKV := ggml.KV{
+		"general.architecture":    "nomic-bert",
+		"nomic-bert.pooling_type": uint32(1),
+	}
+
+	tests := []struct {
+		name        string
+		kvCacheType string
+		calibration string
+	}{
+		{
+			name:        "turbo kv cache env ignored",
+			kvCacheType: "turbo4",
+		},
+		{
+			name:        "split preset env ignored",
+			kvCacheType: "kq8-vturbo4",
+		},
+		{
+			name:        "adaptive sentinel env ignored",
+			kvCacheType: "turboquant-adaptive",
+		},
+		{
+			name:        "calibration env ignored",
+			calibration: "/tmp/turboquant-calibration.json",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("OLLAMA_KV_CACHE_TYPE", tt.kvCacheType)
+			t.Setenv("OLLAMA_TURBOQUANT_CALIBRATION", tt.calibration)
+
+			var logs bytes.Buffer
+			defaultLogger := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
+			t.Cleanup(func() { slog.SetDefault(defaultLogger) })
+
+			req := LoadRequest{
+				KvCacheType:        "turbo4",
+				KeyCacheLayerTypes: "0:q8_0,27:turbo4",
+				FlashAttention:     ml.FlashAttentionDisabled,
+			}
+
+			if !applyEmbeddingTurboquantFallback(&req, embeddingKV) {
+				t.Fatal("expected TurboQuant fallback to apply for embedding model")
+			}
+			if req.KvCacheType != "" {
+				t.Fatalf("KvCacheType = %q, want empty f16 default", req.KvCacheType)
+			}
+			if req.KeyCacheLayerTypes != "" {
+				t.Fatalf("KeyCacheLayerTypes = %q, want empty f16 default", req.KeyCacheLayerTypes)
+			}
+			if got := effectiveCacheTypeLabel(req.KvCacheType); got != "f16" {
+				t.Fatalf("effective cache type = %q, want f16", got)
+			}
+			overrides, err := calibration.ParseKeyLayerOverrides(req.KeyCacheLayerTypes)
+			if err != nil {
+				t.Fatalf("ParseKeyLayerOverrides(%q) returned error: %v", req.KeyCacheLayerTypes, err)
+			}
+			if len(overrides) != 0 {
+				t.Fatalf("key overrides = %v, want none", overrides)
+			}
+			if count := strings.Count(logs.String(), "TurboQuant is unavailable for embedding models"); count != 1 {
+				t.Fatalf("fallback log count = %d, want 1; logs:\n%s", count, logs.String())
+			}
+		})
 	}
 }
 

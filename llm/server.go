@@ -102,6 +102,7 @@ type llmServer struct {
 	llamaModel     *llama.Model
 	llamaModelLock *sync.Mutex
 
+	isEmbedding  bool
 	totalLayers  uint64
 	loadStart    time.Time // Record how long it took the model to load
 	loadProgress float32
@@ -198,6 +199,12 @@ func NewLlamaServer(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, modelPath st
 	}
 
 	fa := envconfig.FlashAttention(f.FlashAttention())
+	kvct := strings.ToLower(strings.TrimSpace(envconfig.KvCacheType()))
+	isEmbedding := isEmbeddingModel(f.KV())
+	embeddingTurboquantFallback := isEmbedding && turboquantConfiguredForEmbedding(kvct)
+	if embeddingTurboquantFallback {
+		fa = false
+	}
 
 	// This will disable flash attention unless all GPUs on the system support it, even if we end up selecting a subset
 	// that can handle it.
@@ -223,8 +230,6 @@ func NewLlamaServer(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, modelPath st
 		}
 	}
 
-	kvct := strings.ToLower(envconfig.KvCacheType())
-
 	if tok == nil {
 		flashAttention := ml.FlashAttentionAuto
 		if faUserSet {
@@ -235,7 +240,7 @@ func NewLlamaServer(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, modelPath st
 			}
 		}
 
-		if kvct != "" {
+		if kvct != "" && !embeddingTurboquantFallback {
 			if isSplitKVCachePreset(kvct) || isTurboquantAdaptiveSentinel(kvct) {
 				slog.Warn("OLLAMA_KV_CACHE_TYPE preset requires the Ollama engine", "type", kvct)
 			} else if f.KVCacheTypeIsQuantized(kvct) {
@@ -255,7 +260,7 @@ func NewLlamaServer(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, modelPath st
 				}
 			}
 		}
-		if envconfig.TurboquantCalibration() != "" {
+		if envconfig.TurboquantCalibration() != "" && !embeddingTurboquantFallback {
 			slog.Warn("OLLAMA_TURBOQUANT_CALIBRATION requires the Ollama engine; ignored")
 		}
 		loadRequest.FlashAttention = flashAttention
@@ -278,7 +283,7 @@ func NewLlamaServer(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, modelPath st
 			} else {
 				slog.Warn("kv cache type not supported by model", "type", kvct)
 			}
-		} else if kvct != "" && kvct != "f16" {
+		} else if kvct != "" && kvct != "f16" && !embeddingTurboquantFallback {
 			slog.Warn("quantized kv cache requested but flash attention disabled", "type", kvct)
 		}
 
@@ -314,6 +319,7 @@ func NewLlamaServer(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, modelPath st
 		loadRequest:    loadRequest,
 		llamaModel:     llamaModel,
 		llamaModelLock: &sync.Mutex{},
+		isEmbedding:    isEmbedding,
 		sem:            semaphore.NewWeighted(int64(numParallel)),
 		totalLayers:    f.KV().BlockCount() + 1,
 		loadStart:      time.Now(),
@@ -357,6 +363,39 @@ func NewLlamaServer(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, modelPath st
 
 func isSplitKVCachePreset(cacheType string) bool {
 	return cacheType == "kq8-vturbo4"
+}
+
+func isEmbeddingModel(kv ggml.KV) bool {
+	_, ok := kv[fmt.Sprintf("%s.pooling_type", kv.Architecture())]
+	return ok
+}
+
+func isTurboquantKVCacheType(cacheType string) bool {
+	cacheType = strings.ToLower(strings.TrimSpace(cacheType))
+	return strings.HasPrefix(cacheType, "turbo") || isSplitKVCachePreset(cacheType)
+}
+
+func turboquantConfiguredForEmbedding(cacheType string) bool {
+	return isTurboquantKVCacheType(cacheType) || strings.TrimSpace(envconfig.TurboquantCalibration()) != ""
+}
+
+func applyEmbeddingTurboquantFallback(loadRequest *LoadRequest, kv ggml.KV) bool {
+	return applyEmbeddingTurboquantFallbackForEmbedding(loadRequest, isEmbeddingModel(kv))
+}
+
+func applyEmbeddingTurboquantFallbackForEmbedding(loadRequest *LoadRequest, isEmbedding bool) bool {
+	kvct := strings.ToLower(strings.TrimSpace(envconfig.KvCacheType()))
+	if !isEmbedding || !turboquantConfiguredForEmbedding(kvct) {
+		return false
+	}
+
+	slog.Info("TurboQuant is unavailable for embedding models; using f16 KV cache",
+		"requested_kv_cache_type", kvct,
+		"calibration_configured", strings.TrimSpace(envconfig.TurboquantCalibration()) != "",
+	)
+	loadRequest.KvCacheType = ""
+	loadRequest.KeyCacheLayerTypes = ""
+	return true
 }
 
 // isTurboquantAdaptiveSentinel is true when the user-supplied cache type is
@@ -710,11 +749,13 @@ func (s *llamaServer) Load(ctx context.Context, systemInfo ml.SystemInfo, system
 	}
 
 	// Check if embedding model and adjust batch size accordingly
-	_, isEmbedding := s.ggml.KV()[fmt.Sprintf("%s.pooling_type", s.ggml.KV().Architecture())]
+	isEmbedding := isEmbeddingModel(s.ggml.KV())
+	s.isEmbedding = isEmbedding
 	if isEmbedding && s.loadRequest.BatchSize < s.options.NumCtx {
 		s.loadRequest.BatchSize = s.options.NumCtx
 		slog.Info("embedding model detected, setting batch size to context length", "batch_size", s.loadRequest.BatchSize)
 	}
+	applyEmbeddingTurboquantFallbackForEmbedding(&s.loadRequest, isEmbedding)
 
 	keyOverrides, err := calibration.ParseKeyLayerOverrides(s.loadRequest.KeyCacheLayerTypes)
 	if err != nil {
@@ -958,6 +999,7 @@ func (s *ollamaServer) Load(ctx context.Context, systemInfo ml.SystemInfo, gpus 
 	}()
 
 	slog.Info("loading model", "model layers", s.totalLayers, "requested", s.options.NumGPU)
+	applyEmbeddingTurboquantFallbackForEmbedding(&s.loadRequest, s.isEmbedding)
 
 	pastAllocations := make(map[uint64]struct{})
 	var backoff float32
