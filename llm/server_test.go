@@ -13,6 +13,27 @@ import (
 	"golang.org/x/sync/semaphore"
 )
 
+func TestIsSplitKVCachePreset(t *testing.T) {
+	if !isSplitKVCachePreset("kq8-vturbo4") {
+		t.Fatal("expected kq8-vturbo4 to be treated as a split KV cache preset")
+	}
+	if isSplitKVCachePreset("turbo4") {
+		t.Fatal("did not expect turbo4 to be treated as a split KV cache preset")
+	}
+}
+
+func TestIsTurboquantAdaptiveSentinel(t *testing.T) {
+	if !isTurboquantAdaptiveSentinel("turboquant-adaptive") {
+		t.Fatal("expected turboquant-adaptive sentinel to be detected")
+	}
+	if isTurboquantAdaptiveSentinel("kq8-vturbo4") {
+		t.Fatal("kq8-vturbo4 must not be treated as the adaptive sentinel")
+	}
+	if isTurboquantAdaptiveSentinel("turbo4") {
+		t.Fatal("turbo4 is not the adaptive sentinel")
+	}
+}
+
 func TestLLMServerFitGPU(t *testing.T) {
 	minMemory := 457 * format.MebiByte
 

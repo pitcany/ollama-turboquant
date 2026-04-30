@@ -49,6 +49,7 @@ import (
 	"github.com/ollama/ollama/template"
 	"github.com/ollama/ollama/thinking"
 	"github.com/ollama/ollama/tools"
+	"github.com/ollama/ollama/tools/turboquant/calibration"
 	"github.com/ollama/ollama/types/errtypes"
 	"github.com/ollama/ollama/types/model"
 	"github.com/ollama/ollama/version"
@@ -1369,6 +1370,10 @@ func GetModelInfo(req api.ShowRequest) (*api.ShowResponse, error) {
 	delete(kvData, "tokenizer.chat_template")
 	resp.ModelInfo = kvData
 
+	if preview, ok := buildKVCachePreview(kvData); ok {
+		resp.KVCache = preview
+	}
+
 	tensorData := make([]api.Tensor, len(tensors.Items()))
 	for cnt, t := range tensors.Items() {
 		tensorData[cnt] = api.Tensor{Name: t.Name, Type: t.Type(), Shape: t.Shape}
@@ -1384,6 +1389,31 @@ func GetModelInfo(req api.ShowRequest) (*api.ShowResponse, error) {
 	}
 
 	return resp, nil
+}
+
+// buildKVCachePreview produces an api.KVCachePreview for the given model
+// metadata using the embedded TurboQuant calibration manifest. Returns
+// (nil, false) when the metadata is insufficient for resolution.
+func buildKVCachePreview(kv ggml.KV) (*api.KVCachePreview, bool) {
+	arch := kv.Architecture()
+	fileTypeStr := kv.FileType().String()
+	headDim := int(kv.EmbeddingHeadCountK())
+	if arch == "" || fileTypeStr == "" || headDim == 0 {
+		return nil, false
+	}
+	manifest, err := calibration.LoadEmbeddedManifest()
+	if err != nil || manifest == nil {
+		return nil, false
+	}
+	preview, _ := manifest.PreviewForModel(arch, fileTypeStr, headDim)
+	return &api.KVCachePreview{
+		Source:             preview.Source,
+		BaseKVCacheType:    preview.BaseKVCacheType,
+		KeyCacheLayerTypes: preview.KeyCacheLayerTypes,
+		BytesPerKVPairF16:  preview.BytesPerKVPairF16,
+		BytesPerKVPair:     preview.BytesPerKVPair,
+		SavedPctVsF16:      preview.SavedPctVsF16,
+	}, true
 }
 
 func getModelData(digest string, verbose bool) (ggml.KV, ggml.Tensors, error) {

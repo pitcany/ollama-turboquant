@@ -598,6 +598,15 @@ func Decode(rs io.ReadSeeker, maxArraySize int) (*GGML, error) {
 }
 
 func (f GGML) GraphSize(context, batch uint64, numParallel int, kvCacheType string, useFlashAttention ml.FlashAttentionType) (kv []uint64, partialOffload, fullOffload uint64) {
+	return f.GraphSizeWithKeyOverrides(context, batch, numParallel, kvCacheType, nil, useFlashAttention)
+}
+
+// GraphSizeWithKeyOverrides is GraphSize but allows the caller to specify
+// per-layer key cache dtype overrides (as cache type strings, e.g. "q8_0").
+// This mirrors the runtime override applied via SetKeyLayerDTypes in the
+// Ollama engine so the reported KV cache footprint matches reality when an
+// adaptive calibration is in effect.
+func (f GGML) GraphSizeWithKeyOverrides(context, batch uint64, numParallel int, kvCacheType string, keyLayerOverrides map[int]string, useFlashAttention ml.FlashAttentionType) (kv []uint64, partialOffload, fullOffload uint64) {
 	context *= uint64(numParallel)
 
 	embedding := f.KV().EmbeddingLength()
@@ -613,7 +622,18 @@ func (f GGML) GraphSize(context, batch uint64, numParallel int, kvCacheType stri
 
 	layers := f.Tensors().GroupLayers()
 
-	bytesPerElement := kvCacheBytesPerElement(kvCacheType)
+	keyBytesPerElement, valueBytesPerElement := kvCacheBytesPerElementKV(kvCacheType)
+	keyOverrideBytes := make(map[int]float64, len(keyLayerOverrides))
+	for layer, dtype := range keyLayerOverrides {
+		keyOverrideBytes[layer] = kvCacheBytesPerElement(dtype)
+	}
+	kvCacheBytes := func(layer int, tokens, kvHeads uint64) uint64 {
+		kBytes := keyBytesPerElement
+		if override, ok := keyOverrideBytes[layer]; ok {
+			kBytes = override
+		}
+		return uint64(float64(tokens*kvHeads) * (float64(embeddingHeadsK)*kBytes + float64(embeddingHeadsV)*valueBytesPerElement))
+	}
 
 	// Default for models unless special-cased below. These defaults mirror the
 	// cache usage in llama.cpp under the assumption that models without special
@@ -635,7 +655,7 @@ func (f GGML) GraphSize(context, batch uint64, numParallel int, kvCacheType stri
 		if headsL > 0 && headsKVL > 0 {
 			// full attention layer
 			// NOTE: Assumes uniform values for all attn layers
-			kv[i] = uint64(float64(context*(embeddingHeadsK+embeddingHeadsV)*headsKVL) * bytesPerElement)
+			kv[i] = kvCacheBytes(i, context, headsKVL)
 			kvSizeAttn += kv[i]
 		} else {
 			// recurrent layer
@@ -750,7 +770,7 @@ func (f GGML) GraphSize(context, batch uint64, numParallel int, kvCacheType stri
 				// Every 6th layer is a global layer, which is the full context size that has already been set. The other
 				// layers are the smaller local (sliding) layers.
 				if (i+1)%gemma3GlobalCacheCount != 0 {
-					kv[i] = uint64(float64(slidingWindow*(embeddingHeadsK+embeddingHeadsV)*headsKV) * bytesPerElement)
+					kv[i] = kvCacheBytes(i, slidingWindow, headsKV)
 				}
 			}
 		}
@@ -829,7 +849,7 @@ func (f GGML) GraphSize(context, batch uint64, numParallel int, kvCacheType stri
 	case "gptoss", "gpt-oss":
 		kv = make([]uint64, f.KV().BlockCount())
 		for i := range kv {
-			kv[i] = uint64(float64((embeddingHeadsK+embeddingHeadsV)*headsKV) * bytesPerElement)
+			kv[i] = kvCacheBytes(i, 1, headsKV)
 			if i%2 == 0 {
 				kv[i] *= (uint64(numParallel)*4096 + batch)
 			} else {
@@ -851,6 +871,10 @@ func (f GGML) GraphSize(context, batch uint64, numParallel int, kvCacheType stri
 func (f GGML) SupportsKVCacheType(cacheType string) bool {
 	if cacheType == "" || cacheType == "f16" {
 		return true
+	}
+
+	if cacheType == "kq8-vturbo4" {
+		return f.SupportsKVCacheType("q8_0") && f.SupportsKVCacheType("turbo4")
 	}
 
 	if slices.Contains([]string{"q8_0", "q4_0"}, cacheType) {
@@ -936,5 +960,15 @@ func kvCacheBytesPerElement(cacheType string) float64 {
 		return 4 // f32 (default for recurrent)
 	default:
 		return 2 // f16 (default)
+	}
+}
+
+func kvCacheBytesPerElementKV(cacheType string) (float64, float64) {
+	switch cacheType {
+	case "kq8-vturbo4":
+		return kvCacheBytesPerElement("q8_0"), kvCacheBytesPerElement("turbo4")
+	default:
+		bytesPerElement := kvCacheBytesPerElement(cacheType)
+		return bytesPerElement, bytesPerElement
 	}
 }

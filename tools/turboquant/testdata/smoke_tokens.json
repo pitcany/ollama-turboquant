@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "model": "qwen2.5:7b",
+  "source": "synthetic smoke fixture for the turboquant-eval harness; replace with the full Phase 0 held-out token snapshot before gating quantization changes",
+  "context_length": 16,
+  "sequences": [
+    {
+      "id": "smoke-a",
+      "tokens": [1, 3838, 6246, 315, 9625, 374, 220, 16, 17, 18, 19, 20]
+    },
+    {
+      "id": "smoke-b",
+      "tokens": [1, 785, 6722, 315, 9625, 374, 19665, 13, 151643]
+    }
+  ]
+}

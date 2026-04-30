@@ -56,6 +56,14 @@ import (
 var errTurboFlashAttnSkipped = errors.New("CUDA backend library or GPU device unavailable")
 
 func turboFlashAttnSupport(headDim, nTokens, kvLen int64) (bool, error) {
+	return turboFlashAttnSupportForTypes(C.GGML_TYPE_TURBO4_0, C.GGML_TYPE_TURBO4_0, headDim, nTokens, kvLen)
+}
+
+func turboFlashAttnSupportTurboKeyF16Value(headDim, nTokens, kvLen int64) (bool, error) {
+	return turboFlashAttnSupportForTypes(C.GGML_TYPE_TURBO4_0, C.GGML_TYPE_F16, headDim, nTokens, kvLen)
+}
+
+func turboFlashAttnSupportForTypes(kType, vType C.enum_ggml_type, headDim, nTokens, kvLen int64) (bool, error) {
 	if err := loadTurboTestBackends(); err != nil {
 		return false, err
 	}
@@ -73,8 +81,8 @@ func turboFlashAttnSupport(headDim, nTokens, kvLen int64) (bool, error) {
 
 	op := C.turbo_test_flash_attn_op(
 		ctx,
-		C.GGML_TYPE_TURBO4_0,
-		C.GGML_TYPE_TURBO4_0,
+		kType,
+		vType,
 		C.int64_t(headDim),
 		C.int64_t(nTokens),
 		C.int64_t(kvLen),

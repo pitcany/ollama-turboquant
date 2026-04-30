@@ -856,10 +856,11 @@ func (c *Context) ComputeWithNotify(cb func(), tensors ...ml.Tensor) {
 var turboQuantDumpSeq atomic.Uint64
 
 type turboQuantDumpConfig struct {
-	dir           string
-	limit         int
-	includePacked bool
-	includeAllF32 bool
+	dir               string
+	limit             int
+	includePacked     bool
+	includeAllF32     bool
+	includeSetRowsSrc bool
 }
 
 type turboQuantDumpHandle struct {
@@ -885,10 +886,11 @@ func installTurboQuantDumpCallback(sched C.ggml_backend_sched_t) *turboQuantDump
 	}
 
 	cfg := &turboQuantDumpConfig{
-		dir:           dir,
-		limit:         limit,
-		includePacked: os.Getenv("OLLAMA_TURBOQUANT_DUMP_PACKED") == "1",
-		includeAllF32: os.Getenv("OLLAMA_TURBOQUANT_DUMP_ALL_F32") == "1",
+		dir:               dir,
+		limit:             limit,
+		includePacked:     os.Getenv("OLLAMA_TURBOQUANT_DUMP_PACKED") == "1",
+		includeAllF32:     os.Getenv("OLLAMA_TURBOQUANT_DUMP_ALL_F32") == "1",
+		includeSetRowsSrc: os.Getenv("OLLAMA_TURBOQUANT_DUMP_SET_ROWS_SRC") == "1",
 	}
 
 	handle := cgo.NewHandle(cfg)
@@ -917,6 +919,9 @@ func turboQuantEvalCallback(t *C.struct_ggml_tensor, ask C.bool, userData unsafe
 		return C.bool(shouldDumpTurboQuantNode(t, cfg.includePacked, cfg.includeAllF32))
 	}
 
+	if cfg.includeSetRowsSrc && t.op == C.GGML_OP_SET_ROWS && t.src[0] != nil {
+		dumpTurboQuantTensor(cfg.dir, cfg.limit, -1, "src0", t.src[0])
+	}
 	return C.bool(dumpTurboQuantTensor(cfg.dir, cfg.limit, -1, "out", t))
 }
 

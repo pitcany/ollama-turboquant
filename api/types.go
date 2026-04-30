@@ -756,6 +756,23 @@ type ShowResponse struct {
 	Capabilities  []model.Capability `json:"capabilities,omitempty"`
 	ModifiedAt    time.Time          `json:"modified_at,omitempty"`
 	Requires      string             `json:"requires,omitempty"`
+
+	// KVCache reports the static TurboQuant calibration preview for this
+	// model under the bundled manifest. Populated only when the model has
+	// the GGUF metadata required for resolution. Read-only; advisory.
+	KVCache *KVCachePreview `json:"kv_cache,omitempty"`
+}
+
+// KVCachePreview is the static TurboQuant calibration preview for a model.
+// It mirrors tools/turboquant/calibration.Preview without forcing api/types
+// to import that package.
+type KVCachePreview struct {
+	Source             string  `json:"source"`
+	BaseKVCacheType    string  `json:"base_kv_cache_type"`
+	KeyCacheLayerTypes string  `json:"key_cache_layer_types,omitempty"`
+	BytesPerKVPairF16  float64 `json:"bytes_per_kv_pair_f16"`
+	BytesPerKVPair     float64 `json:"bytes_per_kv_pair"`
+	SavedPctVsF16      float64 `json:"saved_pct_vs_f16"`
 }
 
 // CopyRequest is the request passed to [Client.Copy].

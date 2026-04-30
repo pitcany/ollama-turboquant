@@ -1179,6 +1179,7 @@ func (s *Server) allocModel(
 	loraPath []string,
 	parallel int,
 	kvCacheType string,
+	keyCacheLayerTypes string,
 	kvSize int,
 	multiUserCache bool,
 ) (panicErr error) {
@@ -1220,7 +1221,7 @@ func (s *Server) allocModel(
 		}
 	}
 
-	s.cache, err = NewInputCache(s.model, kvCacheType, int32(kvSize), parallel, s.batchSize, multiUserCache)
+	s.cache, err = NewInputCache(s.model, kvCacheType, keyCacheLayerTypes, int32(kvSize), parallel, s.batchSize, multiUserCache)
 	if err != nil {
 		return err
 	}
@@ -1314,7 +1315,7 @@ func (s *Server) load(w http.ResponseWriter, r *http.Request) {
 
 		s.batchSize = req.BatchSize
 
-		err := s.allocModel(s.modelPath, params, req.LoraPath, req.Parallel, req.KvCacheType, req.KvSize, req.MultiUserCache)
+		err := s.allocModel(s.modelPath, params, req.LoraPath, req.Parallel, req.KvCacheType, req.KeyCacheLayerTypes, req.KvSize, req.MultiUserCache)
 		if err != nil {
 			s.closeModel()
 

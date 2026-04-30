@@ -29,6 +29,42 @@ func (c *WrapperCache) Init(backend ml.Backend, dtype ml.DType, maxSequences, ca
 	}
 }
 
+func (c *WrapperCache) InitSplit(backend ml.Backend, keyDType, valueDType ml.DType, maxSequences, capacity, maxBatch int) {
+	for _, cache := range c.caches {
+		if split, ok := cache.(interface {
+			InitSplit(ml.Backend, ml.DType, ml.DType, int, int, int)
+		}); ok {
+			split.InitSplit(backend, keyDType, valueDType, maxSequences, capacity, maxBatch)
+			continue
+		}
+
+		if keyDType != valueDType {
+			panic("wrapped cache does not support split key/value dtypes")
+		}
+		cache.Init(backend, keyDType, maxSequences, capacity, maxBatch)
+	}
+}
+
+func (c *WrapperCache) SetKeyLayerDTypes(dtypes map[int]ml.DType) {
+	for _, cache := range c.caches {
+		if layerDTypes, ok := cache.(interface {
+			SetKeyLayerDTypes(map[int]ml.DType)
+		}); ok {
+			layerDTypes.SetKeyLayerDTypes(dtypes)
+		}
+	}
+}
+
+func (c *WrapperCache) SetKeyResidualWindow(window int, baseDType ml.DType) {
+	for _, cache := range c.caches {
+		if residual, ok := cache.(interface {
+			SetKeyResidualWindow(int, ml.DType)
+		}); ok {
+			residual.SetKeyResidualWindow(window, baseDType)
+		}
+	}
+}
+
 func (c *WrapperCache) SetConfig(config ml.CacheConfig) {
 	for _, cache := range c.caches {
 		cache.SetConfig(config)

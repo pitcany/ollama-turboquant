@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/ollama/ollama/kvcache"
 	"github.com/ollama/ollama/ml"
 	"github.com/ollama/ollama/model"
 	"github.com/ollama/ollama/model/input"
+	"github.com/ollama/ollama/tools/turboquant/calibration"
 )
 
 type InputCache struct {
@@ -31,7 +33,7 @@ type InputCache struct {
 	cache kvcache.Cache
 }
 
-func NewInputCache(model model.Model, kvCacheType string, kvSize int32, numSlots int, batchSize int, multiUserCache bool) (*InputCache, error) {
+func NewInputCache(model model.Model, kvCacheType string, keyCacheLayerTypes string, kvSize int32, numSlots int, batchSize int, multiUserCache bool) (*InputCache, error) {
 	numCtx := kvSize / int32(numSlots)
 
 	if int(numCtx) < batchSize {
@@ -46,7 +48,11 @@ func NewInputCache(model model.Model, kvCacheType string, kvSize int32, numSlots
 
 	cache := model.Config().Cache
 	if cache != nil {
-		cache.Init(model.Backend(), kvCacheTypeFromStr(kvCacheType), numSlots, int(numCtx), batchSize)
+		backend := model.Backend()
+		kvCacheType, keyCacheLayerTypes = downgradeTurboForBackend(backend, kvCacheType, keyCacheLayerTypes)
+		if err := initKVCache(cache, backend, kvCacheType, keyCacheLayerTypes, numSlots, int(numCtx), batchSize); err != nil {
+			return nil, err
+		}
 	}
 
 	return &InputCache{
@@ -58,8 +64,147 @@ func NewInputCache(model model.Model, kvCacheType string, kvSize int32, numSlots
 	}, nil
 }
 
+func initKVCache(cache kvcache.Cache, backend ml.Backend, kvCacheType, keyCacheLayerTypes string, maxSequences, capacity, maxBatch int) error {
+	keyDType, valueDType := kvCacheTypesFromStr(kvCacheType)
+	if keyDType == valueDType {
+		cache.Init(backend, keyDType, maxSequences, capacity, maxBatch)
+	} else {
+		split, ok := cache.(interface {
+			InitSplit(ml.Backend, ml.DType, ml.DType, int, int, int)
+		})
+		if !ok {
+			return fmt.Errorf("cache does not support split key/value dtypes: key=%v value=%v", keyDType, valueDType)
+		}
+		split.InitSplit(backend, keyDType, valueDType, maxSequences, capacity, maxBatch)
+	}
+
+	if strings.TrimSpace(keyCacheLayerTypes) == "" {
+		return nil
+	}
+	overrides, err := calibration.ParseKeyLayerOverrides(keyCacheLayerTypes)
+	if err != nil {
+		return fmt.Errorf("parse key_cache_layer_types: %w", err)
+	}
+	if len(overrides) == 0 {
+		return nil
+	}
+	setter, ok := cache.(interface {
+		SetKeyLayerDTypes(map[int]ml.DType)
+	})
+	if !ok {
+		return fmt.Errorf("cache does not support per-layer key dtype overrides")
+	}
+	dtypes := make(map[int]ml.DType, len(overrides))
+	for layer, name := range overrides {
+		dtypes[layer] = kvCacheTypeFromStr(name)
+	}
+	setter.SetKeyLayerDTypes(dtypes)
+	slog.Info("applied per-layer key cache dtype overrides", "spec", calibration.CanonicalKeyLayerSpec(overrides))
+	return nil
+}
+
+func kvCacheTypesFromStr(s string) (ml.DType, ml.DType) {
+	if strings.EqualFold(s, "kq8-vturbo4") {
+		return ml.DTypeQ80, ml.DTypeTurbo4
+	}
+	dtype := kvCacheTypeFromStr(s)
+	return dtype, dtype
+}
+
+// downgradeTurboForBackend rewrites Turbo* cache dtypes to q8_0 if the
+// backend devices do not include a CUDA library, since the production Turbo
+// flash-attention kernels are CUDA-only today. Returns the (possibly
+// rewritten) kvCacheType and per-layer key spec, with a warning logged when
+// any rewriting is performed.
+func downgradeTurboForBackend(backend ml.Backend, kvCacheType, keyCacheLayerTypes string) (string, string) {
+	if !hasTurboDtype(kvCacheType, keyCacheLayerTypes) {
+		return kvCacheType, keyCacheLayerTypes
+	}
+	if backend == nil || backendSupportsTurbo(backend) {
+		return kvCacheType, keyCacheLayerTypes
+	}
+	newKVType := rewriteTurboCacheType(kvCacheType)
+	newSpec, err := rewriteTurboLayerSpec(keyCacheLayerTypes)
+	if err != nil {
+		slog.Warn("failed to downgrade per-layer Turbo dtypes; clearing overrides", "error", err)
+		newSpec = ""
+	}
+	slog.Warn("Turbo* KV cache requires a CUDA backend; downgrading to q8_0",
+		"requested_kv_cache_type", kvCacheType,
+		"requested_key_cache_layer_types", keyCacheLayerTypes,
+		"effective_kv_cache_type", newKVType,
+		"effective_key_cache_layer_types", newSpec,
+	)
+	return newKVType, newSpec
+}
+
+func backendSupportsTurbo(backend ml.Backend) bool {
+	for _, dev := range backend.BackendDevices() {
+		if strings.EqualFold(dev.Library, "CUDA") {
+			return true
+		}
+	}
+	return false
+}
+
+func hasTurboDtype(kvCacheType, layerSpec string) bool {
+	if isTurboDtypeName(kvCacheType) {
+		return true
+	}
+	if strings.EqualFold(kvCacheType, "kq8-vturbo4") {
+		return true
+	}
+	overrides, err := calibration.ParseKeyLayerOverrides(layerSpec)
+	if err != nil {
+		return false
+	}
+	for _, dtype := range overrides {
+		if isTurboDtypeName(dtype) {
+			return true
+		}
+	}
+	return false
+}
+
+func isTurboDtypeName(s string) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "turbo2", "turbo3", "turbo4":
+		return true
+	default:
+		return false
+	}
+}
+
+func rewriteTurboCacheType(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "turbo2", "turbo3", "turbo4":
+		return "q8_0"
+	case "kq8-vturbo4":
+		// Both halves of the split lose Turbo, collapse to uniform q8_0.
+		return "q8_0"
+	default:
+		return s
+	}
+}
+
+func rewriteTurboLayerSpec(spec string) (string, error) {
+	if strings.TrimSpace(spec) == "" {
+		return "", nil
+	}
+	overrides, err := calibration.ParseKeyLayerOverrides(spec)
+	if err != nil {
+		return "", err
+	}
+	for layer, dtype := range overrides {
+		if isTurboDtypeName(dtype) {
+			overrides[layer] = "q8_0"
+		}
+	}
+	return calibration.CanonicalKeyLayerSpec(overrides), nil
+}
+
 func kvCacheTypeFromStr(s string) ml.DType {
-	switch s {
+	switch strings.ToLower(s) {
 	case "q8_0":
 		return ml.DTypeQ80
 	case "q4_0":

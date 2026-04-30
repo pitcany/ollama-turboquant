@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "description": "TurboQuant adaptive calibrations bundled with Ollama. Resolved at runtime when OLLAMA_KV_CACHE_TYPE=turboquant-adaptive.",
+  "default_fallback": "kq8-vturbo4",
+  "entries": [
+    {
+      "architecture": "qwen2",
+      "file_type": "Q4_K_M",
+      "head_dim": 128,
+      "artifact": "qwen2.5-7b-q4_k_m-adaptive.json",
+      "model_hint": "qwen2.5:7b",
+      "validated": "2026-04-30",
+      "phase0_mean_kl": 0.04249074,
+      "phase0_perplexity": 8.70012261
+    }
+  ]
+}

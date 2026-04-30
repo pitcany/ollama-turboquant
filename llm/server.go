@@ -35,6 +35,7 @@ import (
 	"github.com/ollama/ollama/ml"
 	"github.com/ollama/ollama/model"
 	"github.com/ollama/ollama/tokenizer"
+	"github.com/ollama/ollama/tools/turboquant/calibration"
 )
 
 type filteredEnv []string
@@ -235,7 +236,9 @@ func NewLlamaServer(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, modelPath st
 		}
 
 		if kvct != "" {
-			if f.KVCacheTypeIsQuantized(kvct) {
+			if isSplitKVCachePreset(kvct) || isTurboquantAdaptiveSentinel(kvct) {
+				slog.Warn("OLLAMA_KV_CACHE_TYPE preset requires the Ollama engine", "type", kvct)
+			} else if f.KVCacheTypeIsQuantized(kvct) {
 				if flashAttention != ml.FlashAttentionEnabled {
 					slog.Warn("OLLAMA_FLASH_ATTENTION must be enabled to use a quantized OLLAMA_KV_CACHE_TYPE", "type", kvct)
 					loadRequest.KvCacheType = ""
@@ -252,12 +255,21 @@ func NewLlamaServer(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, modelPath st
 				}
 			}
 		}
+		if envconfig.TurboquantCalibration() != "" {
+			slog.Warn("OLLAMA_TURBOQUANT_CALIBRATION requires the Ollama engine; ignored")
+		}
 		loadRequest.FlashAttention = flashAttention
 	} else {
 		// For Ollama engine, use our SupportsFlashAttention logic
 		if fa {
 			slog.Info("enabling flash attention")
 			loadRequest.FlashAttention = ml.FlashAttentionEnabled
+
+			if isTurboquantAdaptiveSentinel(kvct) {
+				resolved, source := resolveAdaptiveCacheType(f)
+				slog.Info("turboquant-adaptive resolved", "cache_type", resolved, "source", source)
+				kvct = resolved
+			}
 
 			// Flash Attention also supports kv cache quantization
 			// Enable if the requested and kv cache type is supported by the model
@@ -268,6 +280,18 @@ func NewLlamaServer(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, modelPath st
 			}
 		} else if kvct != "" && kvct != "f16" {
 			slog.Warn("quantized kv cache requested but flash attention disabled", "type", kvct)
+		}
+
+		if loadRequest.FlashAttention == ml.FlashAttentionEnabled {
+			if envconfig.TurboquantCalibration() != "" {
+				if err := applyTurboquantCalibration(&loadRequest, f, envconfig.TurboquantCalibration()); err != nil {
+					slog.Warn("ignoring OLLAMA_TURBOQUANT_CALIBRATION", "path", envconfig.TurboquantCalibration(), "error", err)
+				}
+			} else if isTurboquantAdaptiveSentinel(strings.ToLower(envconfig.KvCacheType())) {
+				if err := applyTurboquantAdaptive(&loadRequest, f); err != nil {
+					slog.Warn("turboquant-adaptive could not load per-layer overrides; using base preset only", "error", err)
+				}
+			}
 		}
 	}
 
@@ -329,6 +353,160 @@ func NewLlamaServer(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, modelPath st
 	} else {
 		return &llamaServer{llmServer: s, ggml: f}, nil
 	}
+}
+
+func isSplitKVCachePreset(cacheType string) bool {
+	return cacheType == "kq8-vturbo4"
+}
+
+// isTurboquantAdaptiveSentinel is true when the user-supplied cache type is
+// the "turboquant-adaptive" sentinel that asks the runtime to pick the right
+// preset from the bundled calibration manifest.
+func isTurboquantAdaptiveSentinel(cacheType string) bool {
+	return cacheType == "turboquant-adaptive"
+}
+
+// resolveAdaptiveCacheType returns the effective base K/V cache type string
+// for the model when the user picks the turboquant-adaptive sentinel. When
+// the manifest has a matching entry, the entry's base_kv_cache_type is used;
+// otherwise the manifest's default fallback (kq8-vturbo4) is used.
+func resolveAdaptiveCacheType(f *ggml.GGML) (cacheType string, source string) {
+	manifest, err := calibration.LoadEmbeddedManifest()
+	if err != nil || manifest == nil {
+		return "kq8-vturbo4", "fallback (manifest unavailable)"
+	}
+	arch := f.KV().Architecture()
+	fileType := f.KV().FileType().String()
+	headDim := int(f.KV().EmbeddingHeadCountK())
+	if a, name, ok := manifest.Resolve(arch, fileType, headDim); ok && a != nil {
+		return a.BaseKVCacheType, "manifest:" + name
+	}
+	fallback := manifest.DefaultFallback
+	if fallback == "" {
+		fallback = "kq8-vturbo4"
+	}
+	return fallback, "fallback"
+}
+
+// applyTurboquantAdaptive looks up the bundled calibration entry for the
+// loaded model and, when found, applies its per-layer key dtype overrides
+// to the load request. The caller is expected to have already set
+// loadRequest.KvCacheType to the artifact's base via resolveAdaptiveCacheType.
+func applyTurboquantAdaptive(loadRequest *LoadRequest, f *ggml.GGML) error {
+	manifest, err := calibration.LoadEmbeddedManifest()
+	if err != nil {
+		return err
+	}
+	if manifest == nil {
+		return errors.New("embedded manifest is empty")
+	}
+	arch := f.KV().Architecture()
+	fileType := f.KV().FileType().String()
+	headDim := int(f.KV().EmbeddingHeadCountK())
+	a, source, ok := manifest.Resolve(arch, fileType, headDim)
+	if !ok {
+		// Falling back to the base preset is fine; just no per-layer overrides.
+		return fmt.Errorf("no manifest entry for arch=%s file_type=%s head_dim=%d", arch, fileType, headDim)
+	}
+	overrides, err := calibration.ParseKeyLayerOverrides(a.KeyCacheLayerTypes)
+	if err != nil {
+		return fmt.Errorf("parse key_cache_layer_types: %w", err)
+	}
+	for layer, dtype := range overrides {
+		if !f.SupportsKVCacheType(dtype) {
+			return fmt.Errorf("layer %d override dtype %q not supported by model", layer, dtype)
+		}
+	}
+	loadRequest.KeyCacheLayerTypes = calibration.CanonicalKeyLayerSpec(overrides)
+	slog.Info("applied turboquant-adaptive calibration",
+		"source", source,
+		"model", a.Model,
+		"base_kv_cache_type", a.BaseKVCacheType,
+		"key_cache_layer_types", loadRequest.KeyCacheLayerTypes,
+	)
+	return nil
+}
+
+// logKVCacheConfig emits a single info-level summary of the effective KV
+// cache configuration so operators can see the chosen base type, per-layer
+// overrides, total bytes, and the savings vs an f16 baseline. The log line
+// is intentionally machine-parseable: kv-cache key/value pairs only.
+func logKVCacheConfig(f *ggml.GGML, req LoadRequest, kv []uint64, keyOverrides map[int]string, context, batch uint64) {
+	if len(kv) == 0 {
+		return
+	}
+	var kvBytes uint64
+	for _, b := range kv {
+		kvBytes += b
+	}
+	f16KV, _, _ := f.GraphSize(context, batch, req.Parallel, "f16", req.FlashAttention)
+	var f16Bytes uint64
+	for _, b := range f16KV {
+		f16Bytes += b
+	}
+	savedBytes := uint64(0)
+	savedPct := 0.0
+	if f16Bytes > kvBytes {
+		savedBytes = f16Bytes - kvBytes
+	}
+	if f16Bytes > 0 {
+		savedPct = 100 * float64(savedBytes) / float64(f16Bytes)
+	}
+	overrideCount := len(keyOverrides)
+	slog.Info("kv cache configuration",
+		"base_kv_cache_type", effectiveCacheTypeLabel(req.KvCacheType),
+		"key_cache_layer_overrides", overrideCount,
+		"key_cache_layer_types", req.KeyCacheLayerTypes,
+		"kv_cache_bytes", kvBytes,
+		"kv_cache_bytes_f16_baseline", f16Bytes,
+		"kv_cache_bytes_saved_vs_f16", savedBytes,
+		"kv_cache_savings_pct_vs_f16", savedPct,
+		"flash_attention", req.FlashAttention,
+	)
+}
+
+func effectiveCacheTypeLabel(s string) string {
+	if s == "" {
+		return "f16"
+	}
+	return s
+}
+
+// applyTurboquantCalibration loads a calibration artifact and rewrites
+// loadRequest so the Ollama engine uses the artifact's base K/V cache type
+// and per-layer key dtype overrides. It is intentionally tolerant: any
+// validation failure is returned to the caller, which logs a warning and
+// proceeds with the user-configured cache type.
+func applyTurboquantCalibration(loadRequest *LoadRequest, f *ggml.GGML, path string) error {
+	a, err := calibration.Load(path)
+	if err != nil {
+		return err
+	}
+	overrides, err := calibration.ParseKeyLayerOverrides(a.KeyCacheLayerTypes)
+	if err != nil {
+		return fmt.Errorf("parse key_cache_layer_types: %w", err)
+	}
+	if loadRequest.FlashAttention != ml.FlashAttentionEnabled {
+		return errors.New("flash attention is required for calibration-driven KV cache")
+	}
+	base := strings.ToLower(strings.TrimSpace(a.BaseKVCacheType))
+	if !f.SupportsKVCacheType(base) {
+		return fmt.Errorf("base_kv_cache_type %q not supported by model", base)
+	}
+	for layer, dtype := range overrides {
+		if !f.SupportsKVCacheType(dtype) {
+			return fmt.Errorf("layer %d override dtype %q not supported by model", layer, dtype)
+		}
+	}
+	loadRequest.KvCacheType = base
+	loadRequest.KeyCacheLayerTypes = calibration.CanonicalKeyLayerSpec(overrides)
+	slog.Info("applied TurboQuant calibration",
+		"path", path,
+		"model", a.Model,
+		"base_kv_cache_type", base,
+		"key_cache_layer_types", loadRequest.KeyCacheLayerTypes,
+	)
+	return nil
 }
 
 func StartRunner(ollamaEngine bool, modelPath string, gpuLibs []string, out io.Writer, extraEnvs map[string]string) (cmd *exec.Cmd, port int, err error) {
@@ -490,9 +668,14 @@ type LoadRequest struct {
 	FlashAttention ml.FlashAttentionType
 	KvSize         int
 	KvCacheType    string
-	NumThreads     int
-	GPULayers      ml.GPULayersList
-	MultiUserCache bool
+	// KeyCacheLayerTypes is the canonical per-layer key cache dtype spec, in
+	// the form "0:q8_0,1:q8_0,3:q8_0,27:q8_0". Empty means uniform K dtype.
+	// Populated from a TurboQuant calibration artifact when
+	// OLLAMA_TURBOQUANT_CALIBRATION is set; ignored by the legacy llama runner.
+	KeyCacheLayerTypes string
+	NumThreads         int
+	GPULayers          ml.GPULayersList
+	MultiUserCache     bool
 
 	// Legacy fields - not used with the Ollama engine
 	ProjectorPath string
@@ -533,8 +716,14 @@ func (s *llamaServer) Load(ctx context.Context, systemInfo ml.SystemInfo, system
 		slog.Info("embedding model detected, setting batch size to context length", "batch_size", s.loadRequest.BatchSize)
 	}
 
-	kv, graphPartialOffload, graphFullOffload := s.ggml.GraphSize(uint64(s.options.NumCtx), uint64(s.loadRequest.BatchSize),
-		s.loadRequest.Parallel, s.loadRequest.KvCacheType, s.loadRequest.FlashAttention)
+	keyOverrides, err := calibration.ParseKeyLayerOverrides(s.loadRequest.KeyCacheLayerTypes)
+	if err != nil {
+		slog.Warn("invalid KeyCacheLayerTypes; ignoring overrides for memory estimation", "spec", s.loadRequest.KeyCacheLayerTypes, "error", err)
+		keyOverrides = nil
+	}
+	kv, graphPartialOffload, graphFullOffload := s.ggml.GraphSizeWithKeyOverrides(uint64(s.options.NumCtx), uint64(s.loadRequest.BatchSize),
+		s.loadRequest.Parallel, s.loadRequest.KvCacheType, keyOverrides, s.loadRequest.FlashAttention)
+	logKVCacheConfig(s.ggml, s.loadRequest, kv, keyOverrides, uint64(s.options.NumCtx), uint64(s.loadRequest.BatchSize))
 
 	// Use the size of one layer as a buffer
 	layers := s.ggml.Tensors().GroupLayers()

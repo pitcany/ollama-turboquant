@@ -1,12 +1,14 @@
 package ollamarunner
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
 	"testing"
 	"time"
 
+	"github.com/ollama/ollama/fs"
 	"github.com/ollama/ollama/ml"
 	"github.com/ollama/ollama/model/input"
 )
@@ -506,6 +508,12 @@ func TestLoadCacheSlot(t *testing.T) {
 // Mock implementation of the Cache interface
 type mockCache struct {
 	shouldFail bool
+
+	initCalled      bool
+	initSplitCalled bool
+	keyDType        ml.DType
+	valueDType      ml.DType
+	keyLayerDTypes  map[int]ml.DType
 }
 
 // Implement only the methods needed for the test
@@ -517,15 +525,154 @@ func (m *mockCache) Remove(seq int, beginIndex, endIndex int32) error {
 }
 
 // Stub implementations for other interface methods
-func (m *mockCache) SetLayer(layer int)                                                            {}
-func (m *mockCache) Get(ctx ml.Context) (ml.Tensor, ml.Tensor, ml.Tensor)                          { return nil, nil, nil }
-func (m *mockCache) Put(ctx ml.Context, key, value ml.Tensor)                                      {}
-func (m *mockCache) Init(backend ml.Backend, dtype ml.DType, maxSequences, capacity, maxBatch int) {}
-func (m *mockCache) Close()                                                                        {}
-func (m *mockCache) StartForward(ctx ml.Context, batch input.Batch, reserve bool) error            { return nil }
-func (m *mockCache) CopyPrefix(srcSeq, dstSeq int, len int32)                                      {}
-func (m *mockCache) SetConfig(ml.CacheConfig)                                                      {}
-func (m *mockCache) CanResume(seq int, pos int32) bool                                             { return true }
+func (m *mockCache) SetLayer(layer int)                                   {}
+func (m *mockCache) Get(ctx ml.Context) (ml.Tensor, ml.Tensor, ml.Tensor) { return nil, nil, nil }
+func (m *mockCache) Put(ctx ml.Context, key, value ml.Tensor)             {}
+func (m *mockCache) Init(backend ml.Backend, dtype ml.DType, maxSequences, capacity, maxBatch int) {
+	m.initCalled = true
+	m.keyDType = dtype
+	m.valueDType = dtype
+}
+func (m *mockCache) InitSplit(backend ml.Backend, keyDType, valueDType ml.DType, maxSequences, capacity, maxBatch int) {
+	m.initSplitCalled = true
+	m.keyDType = keyDType
+	m.valueDType = valueDType
+}
+func (m *mockCache) SetKeyLayerDTypes(dtypes map[int]ml.DType) {
+	m.keyLayerDTypes = dtypes
+}
+func (m *mockCache) Close()                                                             {}
+func (m *mockCache) StartForward(ctx ml.Context, batch input.Batch, reserve bool) error { return nil }
+func (m *mockCache) CopyPrefix(srcSeq, dstSeq int, len int32)                           {}
+func (m *mockCache) SetConfig(ml.CacheConfig)                                           {}
+func (m *mockCache) CanResume(seq int, pos int32) bool                                  { return true }
+
+func TestKVCacheTypesFromStr(t *testing.T) {
+	tests := []struct {
+		name  string
+		in    string
+		wantK ml.DType
+		wantV ml.DType
+	}{
+		{name: "default", in: "", wantK: ml.DTypeF16, wantV: ml.DTypeF16},
+		{name: "shared turbo", in: "turbo4", wantK: ml.DTypeTurbo4, wantV: ml.DTypeTurbo4},
+		{name: "safe split preset", in: "kq8-vturbo4", wantK: ml.DTypeQ80, wantV: ml.DTypeTurbo4},
+		{name: "case insensitive split preset", in: "KQ8-VTURBO4", wantK: ml.DTypeQ80, wantV: ml.DTypeTurbo4},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotK, gotV := kvCacheTypesFromStr(tt.in)
+			if gotK != tt.wantK || gotV != tt.wantV {
+				t.Fatalf("kvCacheTypesFromStr(%q) = (%v, %v), want (%v, %v)", tt.in, gotK, gotV, tt.wantK, tt.wantV)
+			}
+		})
+	}
+}
+
+func TestInitKVCacheUsesSplitPreset(t *testing.T) {
+	cache := &mockCache{}
+	if err := initKVCache(cache, nil, "kq8-vturbo4", "", 2, 8, 4); err != nil {
+		t.Fatalf("initKVCache() error = %v", err)
+	}
+	if cache.initCalled {
+		t.Fatal("Init() was called for split preset")
+	}
+	if !cache.initSplitCalled {
+		t.Fatal("InitSplit() was not called for split preset")
+	}
+	if cache.keyDType != ml.DTypeQ80 || cache.valueDType != ml.DTypeTurbo4 {
+		t.Fatalf("dtypes = (%v, %v), want (%v, %v)", cache.keyDType, cache.valueDType, ml.DTypeQ80, ml.DTypeTurbo4)
+	}
+}
+
+func TestInitKVCacheUsesSharedCacheType(t *testing.T) {
+	cache := &mockCache{}
+	if err := initKVCache(cache, nil, "turbo4", "", 2, 8, 4); err != nil {
+		t.Fatalf("initKVCache() error = %v", err)
+	}
+	if !cache.initCalled {
+		t.Fatal("Init() was not called for shared cache type")
+	}
+	if cache.initSplitCalled {
+		t.Fatal("InitSplit() was called for shared cache type")
+	}
+	if cache.keyDType != ml.DTypeTurbo4 || cache.valueDType != ml.DTypeTurbo4 {
+		t.Fatalf("dtypes = (%v, %v), want (%v, %v)", cache.keyDType, cache.valueDType, ml.DTypeTurbo4, ml.DTypeTurbo4)
+	}
+}
+
+func TestInitKVCacheAppliesKeyLayerDTypes(t *testing.T) {
+	cache := &mockCache{}
+	spec := "0:q8_0,1:q8_0,3:q8_0,27:q8_0"
+	if err := initKVCache(cache, nil, "turbo4", spec, 2, 8, 4); err != nil {
+		t.Fatalf("initKVCache() error = %v", err)
+	}
+	want := map[int]ml.DType{
+		0:  ml.DTypeQ80,
+		1:  ml.DTypeQ80,
+		3:  ml.DTypeQ80,
+		27: ml.DTypeQ80,
+	}
+	if len(cache.keyLayerDTypes) != len(want) {
+		t.Fatalf("keyLayerDTypes len = %d, want %d (got %#v)", len(cache.keyLayerDTypes), len(want), cache.keyLayerDTypes)
+	}
+	for layer, dtype := range want {
+		if cache.keyLayerDTypes[layer] != dtype {
+			t.Fatalf("layer %d dtype = %v, want %v", layer, cache.keyLayerDTypes[layer], dtype)
+		}
+	}
+}
+
+func TestInitKVCacheRejectsBadKeyLayerSpec(t *testing.T) {
+	cache := &mockCache{}
+	if err := initKVCache(cache, nil, "turbo4", "garbage", 2, 8, 4); err == nil {
+		t.Fatal("expected error for malformed key_cache_layer_types")
+	}
+}
+
+type fakeBackend struct {
+	devices []ml.DeviceInfo
+}
+
+func (f *fakeBackend) Close()                                                          {}
+func (f *fakeBackend) Load(ctx context.Context, progress func(float32)) error          { return nil }
+func (f *fakeBackend) BackendMemory() ml.BackendMemory                                 { return ml.BackendMemory{} }
+func (f *fakeBackend) Config() fs.Config                                               { return nil }
+func (f *fakeBackend) Get(name string) ml.Tensor                                       { return nil }
+func (f *fakeBackend) NewContext() ml.Context                                          { return nil }
+func (f *fakeBackend) NewContextSize(size int) ml.Context                              { return nil }
+func (f *fakeBackend) BackendDevices() []ml.DeviceInfo                                 { return f.devices }
+
+func TestDowngradeTurboForBackendCUDAKeepsTurbo(t *testing.T) {
+	be := &fakeBackend{devices: []ml.DeviceInfo{{DeviceID: ml.DeviceID{Library: "CUDA"}}}}
+	gotKV, gotSpec := downgradeTurboForBackend(be, "turbo4", "0:turbo4,1:q8_0")
+	if gotKV != "turbo4" {
+		t.Fatalf("kv = %q, want turbo4", gotKV)
+	}
+	if gotSpec != "0:turbo4,1:q8_0" {
+		t.Fatalf("spec = %q, want 0:turbo4,1:q8_0", gotSpec)
+	}
+}
+
+func TestDowngradeTurboForBackendCPUDowngrades(t *testing.T) {
+	be := &fakeBackend{devices: []ml.DeviceInfo{{DeviceID: ml.DeviceID{Library: "CPU"}}}}
+	gotKV, gotSpec := downgradeTurboForBackend(be, "kq8-vturbo4", "0:turbo4,1:q8_0,3:turbo3")
+	if gotKV != "q8_0" {
+		t.Fatalf("kv = %q, want q8_0 (CPU downgrade)", gotKV)
+	}
+	if gotSpec != "0:q8_0,1:q8_0,3:q8_0" {
+		t.Fatalf("spec = %q, want all-q8_0 after downgrade", gotSpec)
+	}
+}
+
+func TestDowngradeTurboForBackendNonTurboNoChange(t *testing.T) {
+	be := &fakeBackend{devices: []ml.DeviceInfo{{DeviceID: ml.DeviceID{Library: "Metal"}}}}
+	gotKV, gotSpec := downgradeTurboForBackend(be, "q8_0", "0:q8_0")
+	if gotKV != "q8_0" || gotSpec != "0:q8_0" {
+		t.Fatalf("non-Turbo input was modified: kv=%q spec=%q", gotKV, gotSpec)
+	}
+}
 
 func TestShiftCacheSlot(t *testing.T) {
 	tests := []struct {

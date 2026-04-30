@@ -64,6 +64,237 @@ func TestStore(t *testing.T) {
 	})
 }
 
+func TestInitSplitStoresIndependentKeyValueDTypes(t *testing.T) {
+	backend := &testBackend{}
+	ctx := backend.NewContext()
+	cache := NewCausalCache(nil)
+	defer cache.Close()
+
+	cache.InitSplit(backend, ml.DTypeTurbo4, ml.DTypeF16, 1, 4, 2)
+	cache.SetLayer(0)
+
+	batch := input.Batch{
+		Positions: []int32{0, 1},
+		Sequences: []int{0, 0},
+	}
+	if err := cache.StartForward(ctx, batch, false); err != nil {
+		t.Fatalf("StartForward() error = %v", err)
+	}
+
+	key := ctx.FromFloats([]float32{1, 2, 3, 4}, 2, 1, 2)
+	value := ctx.FromFloats([]float32{5, 6, 7, 8}, 2, 1, 2)
+	cache.Put(ctx, key, value)
+
+	if got := cache.keys[0].DType(); got != ml.DTypeTurbo4 {
+		t.Fatalf("key dtype = %v, want %v", got, ml.DTypeTurbo4)
+	}
+	if got := cache.values[0].DType(); got != ml.DTypeF16 {
+		t.Fatalf("value dtype = %v, want %v", got, ml.DTypeF16)
+	}
+}
+
+func TestKeyLayerDTypeOverridesOnlySelectedKeyLayers(t *testing.T) {
+	backend := &testBackend{}
+	ctx := backend.NewContext()
+	cache := NewCausalCache(nil)
+	defer cache.Close()
+
+	cache.InitSplit(backend, ml.DTypeTurbo4, ml.DTypeTurbo4, 1, 4, 2)
+	cache.SetKeyLayerDTypes(map[int]ml.DType{0: ml.DTypeF16})
+
+	batch := input.Batch{
+		Positions: []int32{0, 1},
+		Sequences: []int{0, 0},
+	}
+	key := ctx.FromFloats([]float32{1, 2, 3, 4}, 2, 1, 2)
+	value := ctx.FromFloats([]float32{5, 6, 7, 8}, 2, 1, 2)
+
+	cache.SetLayer(0)
+	if err := cache.StartForward(ctx, batch, false); err != nil {
+		t.Fatalf("StartForward(layer 0) error = %v", err)
+	}
+	cache.Put(ctx, key, value)
+
+	cache.SetLayer(1)
+	if err := cache.StartForward(ctx, batch, false); err != nil {
+		t.Fatalf("StartForward(layer 1) error = %v", err)
+	}
+	cache.Put(ctx, key, value)
+
+	if got := cache.keys[0].DType(); got != ml.DTypeF16 {
+		t.Fatalf("layer 0 key dtype = %v, want %v", got, ml.DTypeF16)
+	}
+	if got := cache.values[0].DType(); got != ml.DTypeTurbo4 {
+		t.Fatalf("layer 0 value dtype = %v, want %v", got, ml.DTypeTurbo4)
+	}
+	if got := cache.keys[1].DType(); got != ml.DTypeTurbo4 {
+		t.Fatalf("layer 1 key dtype = %v, want %v", got, ml.DTypeTurbo4)
+	}
+	if got := cache.values[1].DType(); got != ml.DTypeTurbo4 {
+		t.Fatalf("layer 1 value dtype = %v, want %v", got, ml.DTypeTurbo4)
+	}
+}
+
+func TestSetKeyResidualWindowRecordsConfiguration(t *testing.T) {
+	cache := NewCausalCache(nil)
+	defer cache.Close()
+
+	cache.SetKeyResidualWindow(64, ml.DTypeTurbo4)
+	if cache.KeyResidualWindow != 64 {
+		t.Fatalf("KeyResidualWindow = %d, want 64", cache.KeyResidualWindow)
+	}
+	if cache.KeyResidualBaseDType != ml.DTypeTurbo4 {
+		t.Fatalf("KeyResidualBaseDType = %v, want %v", cache.KeyResidualBaseDType, ml.DTypeTurbo4)
+	}
+}
+
+func TestSetKeyResidualWindowClearsOnZeroWindow(t *testing.T) {
+	cache := NewCausalCache(nil)
+	defer cache.Close()
+
+	cache.SetKeyResidualWindow(64, ml.DTypeTurbo4)
+	cache.SetKeyResidualWindow(0, ml.DTypeTurbo4)
+	if cache.KeyResidualWindow != 0 {
+		t.Fatalf("KeyResidualWindow = %d, want 0", cache.KeyResidualWindow)
+	}
+	if cache.KeyResidualBaseDType != ml.DTypeOther {
+		t.Fatalf("KeyResidualBaseDType = %v, want %v", cache.KeyResidualBaseDType, ml.DTypeOther)
+	}
+}
+
+func TestSetKeyResidualWindowClearsOnDTypeOther(t *testing.T) {
+	cache := NewCausalCache(nil)
+	defer cache.Close()
+
+	cache.SetKeyResidualWindow(64, ml.DTypeTurbo4)
+	cache.SetKeyResidualWindow(64, ml.DTypeOther)
+	if cache.KeyResidualWindow != 0 {
+		t.Fatalf("KeyResidualWindow = %d, want 0", cache.KeyResidualWindow)
+	}
+	if cache.KeyResidualBaseDType != ml.DTypeOther {
+		t.Fatalf("KeyResidualBaseDType = %v, want %v", cache.KeyResidualBaseDType, ml.DTypeOther)
+	}
+}
+
+func TestKeyResidualOldCount(t *testing.T) {
+	makeCells := func(positions []int32) []cacheCell {
+		cells := make([]cacheCell, len(positions))
+		for i, p := range positions {
+			cells[i] = cacheCell{pos: p}
+		}
+		return cells
+	}
+
+	tests := []struct {
+		name           string
+		window         int
+		baseDType      ml.DType
+		cellPositions  []int32
+		curRangeMin    int
+		cachedSize     int
+		curPositions   []int32
+		want           int
+	}{
+		{
+			name:          "disabled when window is zero",
+			window:        0,
+			baseDType:     ml.DTypeTurbo4,
+			cellPositions: []int32{0, 1, 2, 3},
+			cachedSize:    4,
+			curPositions:  []int32{3},
+			want:          0,
+		},
+		{
+			name:          "disabled when base dtype is other",
+			window:        2,
+			baseDType:     ml.DTypeOther,
+			cellPositions: []int32{0, 1, 2, 3},
+			cachedSize:    4,
+			curPositions:  []int32{3},
+			want:          0,
+		},
+		{
+			name:          "all cells inside window stay recent",
+			window:        8,
+			baseDType:     ml.DTypeTurbo4,
+			cellPositions: []int32{0, 1, 2, 3},
+			cachedSize:    4,
+			curPositions:  []int32{3},
+			want:          0,
+		},
+		{
+			name:          "leading cells outside window become old",
+			window:        2,
+			baseDType:     ml.DTypeTurbo4,
+			cellPositions: []int32{0, 1, 2, 3},
+			cachedSize:    4,
+			curPositions:  []int32{3},
+			want:          2,
+		},
+		{
+			name:          "edge case window equal to cached size",
+			window:        4,
+			baseDType:     ml.DTypeTurbo4,
+			cellPositions: []int32{0, 1, 2, 3},
+			cachedSize:    4,
+			curPositions:  []int32{3},
+			want:          0,
+		},
+		{
+			name:          "all cells become old when window is one and many cells precede max",
+			window:        1,
+			baseDType:     ml.DTypeTurbo4,
+			cellPositions: []int32{0, 1, 2, 3},
+			cachedSize:    4,
+			curPositions:  []int32{10},
+			want:          4,
+		},
+		{
+			name:          "uses curCellRange offset",
+			window:        2,
+			baseDType:     ml.DTypeTurbo4,
+			cellPositions: []int32{99, 100, 0, 1, 2, 3},
+			curRangeMin:   2,
+			cachedSize:    4,
+			curPositions:  []int32{3},
+			want:          2,
+		},
+		{
+			name:          "non-monotonic positions disable split",
+			window:        2,
+			baseDType:     ml.DTypeTurbo4,
+			cellPositions: []int32{0, 2, 1, 3},
+			cachedSize:    4,
+			curPositions:  []int32{3},
+			want:          0,
+		},
+		{
+			name:          "uses max position when batch has multiple positions",
+			window:        2,
+			baseDType:     ml.DTypeTurbo4,
+			cellPositions: []int32{0, 1, 2, 3, 4, 5},
+			cachedSize:    6,
+			curPositions:  []int32{4, 5, 3},
+			want:          4,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cache := &Causal{
+				KeyResidualWindow:    tt.window,
+				KeyResidualBaseDType: tt.baseDType,
+				cells:                makeCells(tt.cellPositions),
+				curCellRange:         cellRange{min: tt.curRangeMin, max: tt.curRangeMin + tt.cachedSize - 1},
+				curPositions:         tt.curPositions,
+			}
+			if got := cache.keyResidualOldCount(tt.cachedSize); got != tt.want {
+				t.Fatalf("keyResidualOldCount() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSWA(t *testing.T) {
 	runPermutedVariants(t, func(t *testing.T, backend *testBackend) {
 		cache := NewSWACache(1, nil)

@@ -582,7 +582,11 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_turbo2(
             const uint32_t shift = k1 * 4;  // 2 bits × 2 elements = 4 bits per pair
             const float v0 = sc[(packed >> shift) & 0x3];
             const float v1 = sc[(packed >> (shift + 2)) & 0x3];
+#ifdef V_DOT2_F32_F16_AVAILABLE
+            const float2 Q_val = __half22float2(((const half2 *) Q_v)[k0/nthreads + k1]);
+#else
             const float2 Q_val = ((const float2 *) Q_v)[k0/nthreads + k1];
+#endif // V_DOT2_F32_F16_AVAILABLE
             sum += v0 * Q_val.x + v1 * Q_val.y;
         }
     }
@@ -639,7 +643,11 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_turbo3(
             const uint8_t idx1 = ((qs_packed >> (qs_shift + 2)) & 0x3) | (((signs >> sign_bit1) & 0x1) << 2);
             const float v0 = sc[idx0];
             const float v1 = sc[idx1];
+#ifdef V_DOT2_F32_F16_AVAILABLE
+            const float2 Q_val = __half22float2(((const half2 *) Q_v)[k0/nthreads + k1]);
+#else
             const float2 Q_val = ((const float2 *) Q_v)[k0/nthreads + k1];
+#endif // V_DOT2_F32_F16_AVAILABLE
             sum += v0 * Q_val.x + v1 * Q_val.y;
         }
     }
@@ -689,7 +697,11 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_turbo4(
             const uint32_t shift = k1 * 8;  // 4 bits × 2 elements = 8 bits per pair
             const float v0 = sc[(packed >> shift) & 0xF];
             const float v1 = sc[(packed >> (shift + 4)) & 0xF];
+#ifdef V_DOT2_F32_F16_AVAILABLE
+            const float2 Q_val = __half22float2(((const half2 *) Q_v)[k0/nthreads + k1]);
+#else
             const float2 Q_val = ((const float2 *) Q_v)[k0/nthreads + k1];
+#endif // V_DOT2_F32_F16_AVAILABLE
             sum += v0 * Q_val.x + v1 * Q_val.y;
         }
     }

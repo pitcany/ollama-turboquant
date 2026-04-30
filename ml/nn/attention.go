@@ -71,12 +71,11 @@ func AttentionWithVMLA(ctx ml.Context, query, key, value, sinks ml.Tensor, vmla 
 		key, value, mask = cache.Get(ctx)
 	}
 
-	// TurboQuant: detect turbo KV cache by checking the key tensor's DType.
-	// This is cache-wrapper-agnostic — works with Causal, HybridCache, WrapperCache, etc.
-	// K/V are already WHT-rotated by set_rows during Put(). Apply forward WHT to Q
-	// so the dot product Q_rot · K_rot^T preserves correct attention scores.
-	turbo := key != nil && isTurboDType(key.DType())
-	if turbo {
+	// TurboQuant: K and V can be diagnosed independently. K rotation requires
+	// rotating Q before KQ; V rotation requires inverse-rotating the attention output.
+	turboKey := key != nil && isTurboDType(key.DType())
+	turboValue := value != nil && isTurboDType(value.DType())
+	if turboKey {
 		if t, ok := query.(turboWHT); ok {
 			query = t.TurboWHT(ctx, 0, 0) // direction=0 (forward), groupSize=0 (auto)
 		}
@@ -86,7 +85,7 @@ func AttentionWithVMLA(ctx ml.Context, query, key, value, sinks ml.Tensor, vmla 
 		cacheConfigApplied := cache != nil
 		kqv := sdpa.ScaledDotProductAttention(ctx, key, value, mask, sinks, vmla, scale, cacheConfigApplied)
 		// TurboQuant: apply inverse WHT to attention output
-		if turbo {
+		if turboValue {
 			if t, ok := kqv.(turboWHT); ok {
 				kqv = t.TurboWHT(ctx, 1, 0) // direction=1 (inverse)
 			}

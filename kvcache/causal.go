@@ -18,7 +18,20 @@ type shiftFn func(ctx ml.Context, layer int, key, shift ml.Tensor) (ml.Tensor, e
 // The tensors are of shape embed dim, kv heads, batch size
 // The mask is of shape history size, batch size
 type Causal struct {
-	DType ml.DType
+	DType      ml.DType
+	KeyDType   ml.DType
+	ValueDType ml.DType
+	KeyLayerDTypes map[int]ml.DType
+
+	// KeyResidualWindow is the number of most-recent key-cache positions that
+	// are kept untouched at KeyDType. Older positions are intended to be
+	// degraded to KeyResidualBaseDType (a Turbo* dtype) via an in-place round
+	// trip. Zero disables the residual-window experiment.
+	//
+	// This field is currently consumed by the eval harness as configuration
+	// only; the in-place graph round trip is implemented in a follow-up.
+	KeyResidualWindow      int
+	KeyResidualBaseDType   ml.DType
 
 	// swaWindowSize is the number of tokens that will be included in the mask
 	// during attention operations. swaMemorySize is the number of tokens that
@@ -128,6 +141,10 @@ func NewChunkedAttentionCache(chunkSize int32, shift shiftFn) *Causal {
 }
 
 func (c *Causal) Init(backend ml.Backend, dtype ml.DType, maxSequences, capacity, maxBatch int) {
+	c.InitSplit(backend, dtype, dtype, maxSequences, capacity, maxBatch)
+}
+
+func (c *Causal) InitSplit(backend ml.Backend, keyDType, valueDType ml.DType, maxSequences, capacity, maxBatch int) {
 	if c.config == nil {
 		var config ml.CacheConfig
 		if cc, ok := backend.(ml.BackendCacheConfig); ok {
@@ -175,10 +192,43 @@ func (c *Causal) Init(backend ml.Backend, dtype ml.DType, maxSequences, capacity
 	cacheSize = roundUp(cacheSize, c.config.CachePadding)
 	c.cells = make([]cacheCell, cacheSize)
 
-	c.DType = dtype
+	c.DType = keyDType
+	c.KeyDType = keyDType
+	c.ValueDType = valueDType
 	c.cellRanges = make(map[int]cellRange)
 	c.backend = backend
 	c.maxBatch = maxBatch
+}
+
+func (c *Causal) SetKeyLayerDTypes(dtypes map[int]ml.DType) {
+	if len(dtypes) == 0 {
+		c.KeyLayerDTypes = nil
+		return
+	}
+	c.KeyLayerDTypes = make(map[int]ml.DType, len(dtypes))
+	for layer, dtype := range dtypes {
+		c.KeyLayerDTypes[layer] = dtype
+	}
+}
+
+// SetKeyResidualWindow configures the eval-only residual-window key-protection
+// experiment. The most recent `window` key-cache positions retain the cache's
+// configured KeyDType, while older positions are intended to be round-tripped
+// through `baseDType` (a Turbo* dtype) so they match Turbo* representation
+// error. Passing window <= 0 or baseDType == ml.DTypeOther clears the
+// configuration.
+//
+// This setter records configuration only. The in-place round trip op that
+// actually mutates old cells is a follow-up; until it lands, the cache reads
+// like a normal high-dtype K cache.
+func (c *Causal) SetKeyResidualWindow(window int, baseDType ml.DType) {
+	if window <= 0 || baseDType == ml.DTypeOther {
+		c.KeyResidualWindow = 0
+		c.KeyResidualBaseDType = ml.DTypeOther
+		return
+	}
+	c.KeyResidualWindow = window
+	c.KeyResidualBaseDType = baseDType
 }
 
 func (c *Causal) SetConfig(config ml.CacheConfig) {
@@ -423,6 +473,10 @@ func (c *Causal) Get(ctx ml.Context) (ml.Tensor, ml.Tensor, ml.Tensor) {
 		cachedSize,
 	)
 
+	if oldCount := c.keyResidualOldCount(cachedSize); oldCount > 0 {
+		key = c.applyKeyResidualWindow(ctx, key, oldCount, cachedSize)
+	}
+
 	if c.config.PermutedV {
 		vHeadDim := value.Dim(1)
 		elemSize := value.Stride(0)
@@ -461,14 +515,14 @@ func (c *Causal) Put(ctx ml.Context, key, value ml.Tensor) {
 	}
 
 	if _, ok := c.keys[c.curLayer]; !ok {
-		c.keys[c.curLayer] = c.ctxs[c.curLayer].Zeros(c.DType, kHeadDim, numKVHeads, len(c.cells))
+		c.keys[c.curLayer] = c.ctxs[c.curLayer].Zeros(c.keyDTypeForLayer(c.curLayer), kHeadDim, numKVHeads, len(c.cells))
 	}
 
 	if _, ok := c.values[c.curLayer]; !ok {
 		if c.config.PermutedV {
-			c.values[c.curLayer] = c.ctxs[c.curLayer].Zeros(c.DType, len(c.cells), vHeadDim, numKVHeads)
+			c.values[c.curLayer] = c.ctxs[c.curLayer].Zeros(c.ValueDType, len(c.cells), vHeadDim, numKVHeads)
 		} else {
-			c.values[c.curLayer] = c.ctxs[c.curLayer].Zeros(c.DType, vHeadDim, numKVHeads, len(c.cells))
+			c.values[c.curLayer] = c.ctxs[c.curLayer].Zeros(c.ValueDType, vHeadDim, numKVHeads, len(c.cells))
 		}
 	}
 
@@ -492,6 +546,124 @@ func (c *Causal) Put(ctx ml.Context, key, value ml.Tensor) {
 
 		ctx.Forward(valueCache.SetRows(ctx, value, c.curLoc))
 	}
+}
+
+func (c *Causal) keyDTypeForLayer(layer int) ml.DType {
+	if dtype, ok := c.KeyLayerDTypes[layer]; ok {
+		return dtype
+	}
+	return c.KeyDType
+}
+
+// keyResidualOldCount returns how many of the leading cached cells in the
+// current Get view fall outside the residual window N. Cells inside the
+// window keep the high-precision key content; cells outside are intended to
+// be degraded through KeyResidualBaseDType.
+//
+// The split point is computed against the maximum position of the current
+// batch. A cell is "old" if its position is more than N less than that
+// maximum. The Causal cache writes positions in monotonic order during a
+// fresh forward pass, so the split is contiguous: the leading oldCount cells
+// are old, the trailing cachedSize-oldCount cells are recent.
+//
+// Returns 0 when the residual window is disabled, when no cells are old, or
+// when the cell range positions are not strictly monotonic (a defensive
+// fallback that disables the split rather than corrupting key content).
+func (c *Causal) keyResidualOldCount(cachedSize int) int {
+	if c.KeyResidualWindow <= 0 || c.KeyResidualBaseDType == ml.DTypeOther {
+		return 0
+	}
+	if cachedSize <= 0 {
+		return 0
+	}
+	if len(c.curPositions) == 0 {
+		return 0
+	}
+	var maxCurPos int32 = c.curPositions[0]
+	for _, p := range c.curPositions[1:] {
+		if p > maxCurPos {
+			maxCurPos = p
+		}
+	}
+	cutoff := maxCurPos - int32(c.KeyResidualWindow) + 1
+	if cutoff <= 0 {
+		return 0
+	}
+	start := c.curCellRange.min
+	end := start + cachedSize
+	if end > len(c.cells) {
+		return 0
+	}
+	prevPos := int32(-1)
+	for i := start; i < end; i++ {
+		pos := c.cells[i].pos
+		if pos < prevPos {
+			return 0
+		}
+		prevPos = pos
+	}
+	oldCount := 0
+	for i := start; i < end; i++ {
+		if c.cells[i].pos < cutoff {
+			oldCount++
+		} else {
+			break
+		}
+	}
+	return oldCount
+}
+
+// applyKeyResidualWindow splits the cached key view at the residual-window
+// boundary, round-trips the leading oldCount cells through
+// KeyResidualBaseDType (a Turbo* dtype), and returns the concatenation of
+// the round-tripped old cells and the untouched recent cells. When
+// oldCount == cachedSize it round-trips the whole view without a concat.
+func (c *Causal) applyKeyResidualWindow(ctx ml.Context, key ml.Tensor, oldCount, cachedSize int) ml.Tensor {
+	if oldCount <= 0 {
+		return key
+	}
+	kHeadDim := key.Dim(0)
+	numKVHeads := key.Dim(1)
+	rowSize := key.Stride(2)
+	originalDType := key.DType()
+
+	old := key.View(ctx, 0,
+		kHeadDim, key.Stride(1),
+		numKVHeads, key.Stride(2),
+		oldCount,
+	)
+	// Route the round trip and concat through F32. ggml's CPU dup only
+	// supports quantized→F32 (ggml-cpu/ops.cpp dup_from_q), CUDA cpy.cu has
+	// no Turbo* entries, and CUDA concat (ggml-cuda/concat.cu) requires F32
+	// on both inputs. F32 hops match the supported quantize/dequantize
+	// traits and the supported concat path.
+	//
+	// KNOWN LIMITATION (2026-04-30): the Cast(F32→Turbo*).Cast(Turbo*→F32)
+	// pair is NOT a true round trip — quantize_row_turbo4_0_ref applies a
+	// forward WHT before quantizing (ggml-turbo-quant.c:482-485) but
+	// dequantize_row_turbo4_0 deliberately does NOT undo it
+	// (ggml-turbo-quant.c:591-594, the production path compensates by
+	// applying GGML_OP_TURBO_WHT to Q and to the FA output). Without that
+	// graph-level compensation here, the round-tripped slice ends up in
+	// the rotated basis while Q stays in the original basis, producing
+	// catastrophically wrong attention scores. See TURBOQUANT-DEBUG-LOG.md
+	// for the full analysis and proposal.
+	oldF32 := old.
+		Cast(ctx, ml.DTypeF32).
+		Cast(ctx, c.KeyResidualBaseDType).
+		Cast(ctx, ml.DTypeF32)
+
+	if oldCount == cachedSize {
+		return oldF32.Cast(ctx, originalDType)
+	}
+
+	recent := key.View(ctx, rowSize*oldCount,
+		kHeadDim, key.Stride(1),
+		numKVHeads, key.Stride(2),
+		cachedSize-oldCount,
+	)
+	recentF32 := recent.Cast(ctx, ml.DTypeF32)
+	return oldF32.Concat(ctx, recentF32, 2).Cast(ctx, originalDType)
 }
 
 func (c *Causal) CopyPrefix(srcSeq, dstSeq int, len int32) {

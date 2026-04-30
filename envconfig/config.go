@@ -218,6 +218,11 @@ var (
 	DebugLogRequests = Bool("OLLAMA_DEBUG_LOG_REQUESTS")
 	// KvCacheType is the quantization type for the K/V cache.
 	KvCacheType = String("OLLAMA_KV_CACHE_TYPE")
+	// TurboquantCalibration is the path to a TurboQuant calibration JSON
+	// artifact produced by cmd/turboquant-calibrate. When set, the Ollama
+	// engine uses the artifact's base K/V cache type as the effective KV
+	// cache type and applies its per-layer key dtype overrides.
+	TurboquantCalibration = String("OLLAMA_TURBOQUANT_CALIBRATION")
 	// NoHistory disables readline history.
 	NoHistory = Bool("OLLAMA_NOHISTORY")
 	// NoPrune disables pruning of model blobs on startup.
@@ -307,7 +312,8 @@ func AsMap() map[string]EnvVar {
 		"OLLAMA_DEBUG":              {"OLLAMA_DEBUG", LogLevel(), "Show additional debug information (e.g. OLLAMA_DEBUG=1)"},
 		"OLLAMA_DEBUG_LOG_REQUESTS": {"OLLAMA_DEBUG_LOG_REQUESTS", DebugLogRequests(), "Log inference request bodies and replay curl commands to a temp directory"},
 		"OLLAMA_FLASH_ATTENTION":    {"OLLAMA_FLASH_ATTENTION", FlashAttention(false), "Enabled flash attention"},
-		"OLLAMA_KV_CACHE_TYPE":      {"OLLAMA_KV_CACHE_TYPE", KvCacheType(), "Quantization type for the K/V cache (default: f16)"},
+		"OLLAMA_KV_CACHE_TYPE":      {"OLLAMA_KV_CACHE_TYPE", KvCacheType(), "Quantization type for the K/V cache (default: f16; Ollama engine also supports kq8-vturbo4 and turboquant-adaptive)"},
+		"OLLAMA_TURBOQUANT_CALIBRATION": {"OLLAMA_TURBOQUANT_CALIBRATION", TurboquantCalibration(), "Path to a TurboQuant calibration JSON artifact (Ollama engine only); overrides OLLAMA_KV_CACHE_TYPE and applies per-layer key dtype overrides"},
 		"OLLAMA_GPU_OVERHEAD":       {"OLLAMA_GPU_OVERHEAD", GpuOverhead(), "Reserve a portion of VRAM per GPU (bytes)"},
 		"OLLAMA_HOST":               {"OLLAMA_HOST", Host(), "IP Address for the ollama server (default 127.0.0.1:11434)"},
 		"OLLAMA_KEEP_ALIVE":         {"OLLAMA_KEEP_ALIVE", KeepAlive(), "The duration that models stay loaded in memory (default \"5m\")"},

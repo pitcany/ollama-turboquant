@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "model": "qwen2.5:7b",
+  "base_kv_cache_type": "turbo4",
+  "layer_dtype": "q8_0",
+  "key_cache_layer_types": "0:q8_0,1:q8_0,3:q8_0,27:q8_0",
+  "notes": "Validated 2026-04-30 against 256 Phase 0 sequences: mean_nll=2.16333712, perplexity=8.70012261, mean_kl=0.04249074. See tools/turboquant/README.md and TURBOQUANT-DEBUG-LOG.md for full provenance."
+}
