@@ -3,6 +3,704 @@
 Purpose: rigorous, evidence-first log per `TURBOQUANT-CLAUDE-HANDOFF.md`.
 No speculative patches. Each fix must cite the first proven mismatch it explains.
 
+## 2026-04-30 - Promote safe presets to production runtime
+
+Goal: make the two Phase-0-validated KV cache configurations available as
+first-class runtime modes so users do not have to invoke the eval harness.
+Treat all-Turbo4 K as out of scope, do not re-introduce QJL, and do not reopen
+the residual-window experiment without a dedicated graph op.
+
+What landed (Ollama engine only; the legacy llama.cpp runner warns and ignores
+both modes):
+
+1. `kq8-vturbo4` was already wired through `fs/ggml`, `runner/ollamarunner`,
+   and `llm/server.go`; this entry verifies the path and adds memory-side
+   coverage. Setting `OLLAMA_KV_CACHE_TYPE=kq8-vturbo4` produces a split
+   cache via `Causal.InitSplit(K=q8_0, V=turbo4)`. The memory estimator in
+   `fs/ggml/ggml.go` (`kvCacheBytesPerElementKV`) returns `(1.0, 0.531)`
+   bytes per element so the per-layer KV size reported through the
+   `GraphSize` path matches the cache that is actually allocated. Confirmed
+   by `TestKVCacheBytesPerElementKV` and `TestInitKVCacheUsesSplitPreset`.
+
+2. New env var `OLLAMA_TURBOQUANT_CALIBRATION` points at a calibration JSON
+   produced by `cmd/turboquant-calibrate`. The artifact layout is parsed by
+   the new `tools/turboquant/calibration` package, which only reads the
+   runtime-relevant fields (`version`, `model`, `base_kv_cache_type`,
+   `layer_dtype`, `key_cache_layer_types`). When the env var is set on the
+   Ollama engine, `applyTurboquantCalibration` in `llm/server.go`:
+
+   - Loads and validates the artifact (rejects bad version, empty
+     `base_kv_cache_type`, empty/malformed `key_cache_layer_types`,
+     unsupported dtypes for the model architecture).
+   - Overrides `loadRequest.KvCacheType` with the artifact's
+     `base_kv_cache_type` and stores the canonical per-layer spec on a new
+     `LoadRequest.KeyCacheLayerTypes` field.
+   - Requires `FlashAttention=Enabled`; otherwise rejects the artifact.
+
+3. The runner forwards `KeyCacheLayerTypes` through
+   `Server.allocModel` → `NewInputCache` → `initKVCache`. After the cache is
+   `Init`/`InitSplit`-initialized, `initKVCache` parses the spec via
+   `calibration.ParseKeyLayerOverrides` and calls `Causal.SetKeyLayerDTypes`
+   so the listed layers get `KeyDType` overridden per layer. Confirmed by
+   `TestInitKVCacheAppliesKeyLayerDTypes` and
+   `TestInitKVCacheRejectsBadKeyLayerSpec`.
+
+4. Memory accounting changes: `GraphSize` is now a thin wrapper around the
+   new `GraphSizeWithKeyOverrides`, which takes a `map[int]string` of
+   per-layer K dtypes and uses `kvCacheBytesPerElement(dtype)` for matching
+   layers when filling the per-layer `kv[i]` array. `llm/server.go` parses
+   `loadRequest.KeyCacheLayerTypes` (via `calibration.ParseKeyLayerOverrides`)
+   and feeds the result into `GraphSizeWithKeyOverrides`, so the reported
+   KV-cache footprint reflects the actual mixed dtypes per layer instead of
+   the base dtype across the whole model. For the
+   `qwen2.5-7b-q4km-adaptive` artifact (4 of 28 layers at `q8_0`, rest at
+   `turbo4`), this is `~5.3%` more accurate than treating the cache as
+   pure `turbo4` and `~71.8%` smaller than the f16 baseline.
+
+Out of scope for this entry, intentionally:
+
+- All-Turbo4 K still fails Phase 0 catastrophically; not promoted.
+- The residual-window cast trick remains dead per the prior log entry; no
+  new graph op was added.
+- QJL/JL was not reintroduced.
+
+Verification:
+
+```bash
+GOCACHE=/tmp/ollama-build-gocache \
+go test -count=1 \
+  ./tools/turboquant/... \
+  ./cmd/turboquant-tokenize ./cmd/turboquant-eval \
+  ./cmd/turboquant-dump-index ./cmd/turboquant-select-layers \
+  ./cmd/turboquant-calibrate \
+  ./kvcache ./ml/nn ./llm ./envconfig ./fs/ggml ./runner/ollamarunner
+git diff --check
+```
+
+All 16 packages PASS, `git diff --check` is clean.
+
+## 2026-04-30 - Residual-window Phase 0 grid: blocked by WHT basis mismatch
+
+Goal:
+- Run the Phase 0 eval grid for the residual-window experiment on
+  `qwen2.5:7b` Q4_K_M: `{f16,q8_0}` recent dtype crossed with windows
+  `{64,128,256}`, residual dtype `turbo4`, snapshot
+  `tools/turboquant/testdata/qwen25_7b_phase0_tokens.json`,
+  `-num-ctx 1024 -batch-size 512 -num-gpu-layers 999 -flash-attention=true
+  -reference-kv-cache-type f16 -engine go -format json`. Smoke at
+  `-limit 1`, then `-limit 16`, then full 256.
+- Decision criterion: only promote a window preset to the production
+  runtime if it clearly beats the `kq8-vturbo4` baseline
+  (`mean_nll=2.15085919`, `perplexity=8.59223759`, `mean_kl=0.01705642`).
+
+Pre-flight setup:
+
+```bash
+# CUDA library state at session start:
+ls -la build/lib/ollama/libggml-cuda.so build/lib/ollama/cuda_v12/libggml-cuda.so
+# -rwxrwxr-x 488898176 Apr 29 22:07 build/lib/ollama/libggml-cuda.so
+# -rwxrwxr-x 472554816 Apr 29 16:13 build/lib/ollama/cuda_v12/libggml-cuda.so
+
+# Initially moved flat aside per the handoff "double-load" gotcha, then
+# discovered the in-process loader (ml/backend/ggml/ggml/src/ggml.go
+# OnceLoad) only searches the top of OLLAMA_LIBRARY_PATH and uses the
+# fallback at ggml-backend-reg.cpp:601-614 to load `libggml-cuda.so` (no
+# suffix) directly. With the flat moved aside, the loader could not find
+# any CUDA backend and fell back to CPU (logs: "offloaded 0/29 layers to
+# GPU"). Restored the flat for the actual eval runs:
+
+mv /tmp/ollama-build-libggml-cuda-flat-0430a.so build/lib/ollama/libggml-cuda.so
+```
+
+The handoff's "double-load" warning applies to a different code path
+(runner subprocess discovery looking inside subdirectories). For
+in-process eval the flat library is required.
+
+Baseline focused Go tests (clean):
+
+```bash
+GOCACHE=/tmp/ollama-build-gocache \
+go test -count=1 \
+  ./tools/turboquant/... \
+  ./cmd/turboquant-tokenize ./cmd/turboquant-eval \
+  ./cmd/turboquant-dump-index ./cmd/turboquant-select-layers \
+  ./cmd/turboquant-calibrate \
+  ./kvcache ./ml/nn ./llm ./envconfig ./fs/ggml ./runner/ollamarunner
+```
+
+All 15 packages PASS.
+
+### Smoke 1: `-key-cache-type f16 -value-cache-type turbo4 -key-cache-residual-window 64 -key-cache-residual-dtype turbo4 -limit 1`
+
+Command:
+
+```bash
+GOCACHE=/tmp/ollama-build-gocache \
+OLLAMA_LIBRARY_PATH=/home/yannik/Work/ollama-build/build/lib/ollama \
+CUDA_VISIBLE_DEVICES=0 \
+go run ./cmd/turboquant-eval \
+  -model qwen2.5:7b \
+  -snapshot tools/turboquant/testdata/qwen25_7b_phase0_tokens.json \
+  -engine go -num-ctx 1024 -batch-size 512 -num-gpu-layers 999 \
+  -flash-attention=true -reference-kv-cache-type f16 \
+  -key-cache-type f16 -value-cache-type turbo4 \
+  -key-cache-residual-window 64 -key-cache-residual-dtype turbo4 \
+  -limit 1 -format json
+```
+
+Observation: 18 worker threads abort with the same fatal message:
+
+```
+/home/yannik/Work/ollama-build/ml/backend/ggml/ggml/src/ggml-cpu/ops.cpp:571: fatal error
+```
+
+That line is the `default` case of `ggml_compute_forward_dup`'s switch on
+`src0->type`: it accepts `quantized → F32` (line 567-568 calls
+`ggml_compute_forward_dup_from_q`) and aborts on every other quantized
+destination. So the unsupported direction is `Turbo4 → F16` (quantized
+src, non-F32 dst) — i.e. the second leg of `Cast(turbo4).Cast(f16)`.
+
+Cross-checked CUDA `cpy.cu`:
+
+- F16 → F16/BF16/F32 (lines 497-513). No Turbo entries.
+- Q8_0 → F32 (line 467). No Turbo entries either direction.
+- F32 → Q8_0/Q4_0/Q4_1/Q5_0/Q5_1/IQ4_NL (lines 464-491). No F32 → Turbo.
+- Default path is `GGML_ABORT("unsupported type combination ...")`.
+
+So both legs of `f16 ↔ turbo4` Cast lack a CUDA implementation; the
+scheduler falls back to CPU for both, and CPU only implements
+`quantized → F32` — hence the abort on the second leg.
+
+CPU traits ARE registered for Turbo4 (`from_float = quantize_row_turbo4_0_ref`,
+`to_float = dequantize_row_turbo4_0`, both in `ggml-cpu/ggml-cpu.c:413` and
+`ggml/ggml.c:732`). The traits are reachable via `dup_to_q<float>` and
+`dup_from_q`. So an F32 hop on both sides routes through supported entries:
+
+```
+f16 → F32     (CPU/CUDA OK)
+F32 → turbo4  (CPU dup_to_q<float>; CUDA falls back to CPU)
+turbo4 → F32  (CPU dup_from_q;     CUDA falls back to CPU)
+F32 → f16     (CPU/CUDA OK)
+```
+
+Minimal fix in `kvcache/causal.go applyKeyResidualWindow` to remove the
+abort, justified by the file:line evidence above:
+
+```go
+oldF32 := old.
+    Cast(ctx, ml.DTypeF32).
+    Cast(ctx, c.KeyResidualBaseDType).
+    Cast(ctx, ml.DTypeF32)
+```
+
+### Smoke 2: same flags, after the F32-hop fix
+
+A second abort surfaced after the cast chain ran:
+
+```
+/home/yannik/Work/ollama-build/ml/backend/ggml/ggml/src/ggml-cuda/concat.cu:165:
+GGML_ASSERT(src0->type == GGML_TYPE_F32) failed
+```
+
+CUDA's concat kernel only accepts F32 inputs (concat.cu:165-167). The
+`old.Concat(recent, 2)` step on F16 inputs hits this assert. Symmetric
+minimal fix: route the concat through F32 too, then cast the merged
+result back to the original dtype:
+
+```go
+recentF32 := recent.Cast(ctx, ml.DTypeF32)
+return oldF32.Concat(ctx, recentF32, 2).Cast(ctx, originalDType)
+```
+
+### Smoke 3: same flags, after both F32-hop fixes
+
+Result:
+
+```json
+{
+  "kv_cache_type": "f16",
+  "value_cache_type": "turbo4",
+  "key_cache_residual_window": 64,
+  "key_cache_residual_dtype": "turbo4",
+  "reference_kv_cache_type": "f16",
+  "num_sequences": 1,
+  "duration_ms": 7181,
+  "metrics": {
+    "token_count": 1023,
+    "mean_nll": 10.417243982132835,
+    "perplexity": 33431.17016136512,
+    "kl_token_count": 1023,
+    "mean_kl": 1.1098740691230278
+  }
+}
+```
+
+The eval ran end-to-end with 29/29 layers offloaded to GPU, but the
+metrics are **worse than the all-Turbo4 K + Turbo4 V baseline**
+(`mean_nll=6.10887882`, `perplexity=449.83`, `mean_kl=4.467`). This is
+catastrophic and contradicts the experiment's hypothesis that protecting
+the most recent N positions improves quality.
+
+### Bisecting the regression
+
+Sanity 1 — window larger than the sequence so `oldCount == 0` (no-op
+path): same flags, `-key-cache-residual-window 2048 -limit 1`. Result:
+`mean_nll=1.7820666015494437, mean_kl=0.012069528698299413`. **Exact
+match** to the existing f16K/Turbo4V baseline (README Phase 0 Results,
+line 103). The split-point gate behaves correctly when no cells are old.
+
+Sanity 2 — bypass only the Turbo round trip but keep the View+F32+Concat
+plumbing. Replaced
+
+```go
+oldF32 := old.Cast(F32).Cast(turbo).Cast(F32)
+```
+
+with
+
+```go
+oldF32 := old.Cast(F32) // bypass round trip
+```
+
+and re-ran the same `-key-cache-residual-window 64 -limit 1` command.
+Result: `mean_nll=1.7820666015494437, mean_kl=0.012069528698299413`,
+again identical to the f16K/Turbo4V baseline. So the View, F32 hop,
+Concat, and downstream FA path are correctness-preserving; the bug is
+inside the Turbo round trip itself.
+
+Sanity 3 — restored the round trip and pushed the window to the other
+extreme (`-key-cache-residual-window 1`, so all but one cell are
+round-tripped). Expected: result close to the all-Turbo4 K baseline
+(`mean_nll≈6.11`). Observed: `mean_nll=11.0151, perplexity=60786.27,
+mean_kl=1.0039`. **Worse than all-Turbo4 K**, by a large margin.
+
+### Root cause: WHT basis mismatch
+
+`ggml-turbo-quant.c:457-565` (`quantize_row_turbo4_0_ref`) applies a
+forward Walsh-Hadamard rotation **before** quantizing into 4-bit
+PolarQuant centroids:
+
+```c
+/* Step 2: Forward WHT rotation (matches CUDA set_rows) */
+float rotated[TURBO_D];
+memcpy(rotated, normalized, d * sizeof(float));
+turbo_cpu_fwht(rotated, d);
+```
+
+`ggml-turbo-quant.c:568-595` (`dequantize_row_turbo4_0`) **does not**
+apply the inverse WHT — its in-code comment explicitly explains why:
+
+```c
+/* No inverse WHT, dequant stays in the rotated domain.
+* Q is WHT-rotated by the graph, so <Q_rot, K_rot> gives correct
+* attention scores.
+* The inverse WHT is applied to the attention output via
+* GGML_OP_TURBO_WHT (direction=1) in the graph.
+*/
+```
+
+The production all-Turbo4 K cache works because the model graph wraps
+the FA call: `GGML_OP_TURBO_WHT(Q)` → FA(Q_rot, K_rot, V) →
+`GGML_OP_TURBO_WHT(out, direction=1)`. WHT is orthogonal so
+`<Q_rot, K_rot> = <Q, K>` and the inverse WHT on the output recovers
+the correct basis.
+
+The residual-window code path does **not** insert those graph nodes:
+the cache type is `f16`, so the model assumes K is in the original
+basis and emits FA without WHT-rotating Q. Our `Cast(F32→Turbo4)
+→Cast(Turbo4→F32)` round trip leaves the old-cell slice in the
+rotated basis. After Concat with the recent slice (still in the
+original basis) and Cast back to f16, the merged K is partly rotated
+and partly not, while Q is entirely un-rotated. Attention scores are
+computed across mismatched bases for every old cell.
+
+This is the first concrete mismatch and it is rigorously isolated:
+
+- Window=2048 (no cells are old): result = baseline. ✓
+- Bypass Turbo round trip, keep plumbing: result = baseline. ✓
+- Round trip enabled, window=1: result far worse than all-Turbo4 K. ✗
+- Round trip enabled, window=64: result far worse than all-Turbo4 K. ✗
+
+The Cast-based round trip is **not** basis-invertible, by design.
+This was anticipated by the handoff's "ggml_cast risk surface on CUDA"
+caveat, but the gap is deeper than CUDA dispatch — it is in the Turbo
+encoder/decoder pair on every backend.
+
+### Decision
+
+Per the task spec: "If output is garbled or NLL is invalid, do NOT
+patch speculatively. ... reproduce deterministically, isolate the
+first concrete mismatch, and only then propose a minimal fix." The
+first concrete mismatch is identified above. There is no minimal fix:
+making the round trip basis-correct requires either
+
+1. A new graph op (e.g., `GGML_OP_TURBO_ROUNDTRIP`) that applies
+   forward WHT → quantize → dequantize → inverse WHT inside a single
+   compensating block, used only on the old slice, OR
+2. A `Cast(turbo4)` variant that internally undoes the WHT on dequant
+   so the existing Cast pair becomes a true round trip in the
+   original basis. Production cache code would have to opt out of
+   that variant, since it relies on the rotated K convention.
+
+Both options are research-grade additions, not minimal fixes. The
+`{f16,q8_0}` × `{64,128,256}` grid is therefore **not run** — every
+cell would inherit the same WHT-basis bug and produce metrics that
+say nothing about residual-window quality. Per the decision
+criterion, no preset is being promoted.
+
+### Files changed
+
+- `kvcache/causal.go applyKeyResidualWindow` — F32 hops on both legs
+  of the cast chain plus around the Concat. Justified by ops.cpp:571
+  and concat.cu:165 aborts; documented in the function comment that
+  this is necessary but not sufficient (the WHT basis bug remains).
+- `tools/turboquant/README.md` — new "Residual-Window Phase 0 Results"
+  subsection documenting the measured numbers, the WHT basis finding,
+  and the explicit non-promotion decision.
+
+### Verification
+
+```bash
+git diff --check
+```
+
+```bash
+GOCACHE=/tmp/ollama-build-gocache \
+go test -count=1 \
+  ./tools/turboquant/... \
+  ./cmd/turboquant-tokenize ./cmd/turboquant-eval \
+  ./cmd/turboquant-dump-index ./cmd/turboquant-select-layers \
+  ./cmd/turboquant-calibrate \
+  ./kvcache ./ml/nn ./llm ./envconfig ./fs/ggml ./runner/ollamarunner
+```
+
+All 15 packages PASS.
+
+### Open items for next session
+
+- Decide whether to fund the `GGML_OP_TURBO_ROUNDTRIP` graph op, or
+  switch the experiment to a non-WHT residual representation (would
+  require a new Q-style dtype that protects only the old slice).
+- The F32-hop fix in `applyKeyResidualWindow` is correct but not
+  sufficient on its own. If the residual-window experiment is
+  abandoned, the helper and the eval flags should be either removed
+  or marked clearly as "round trip not yet implemented" so future
+  contributors do not retry the same dead end.
+
+## 2026-04-30 - Residual-window round-trip op landed
+
+Goal:
+- Implement the graph operation that actually performs the residual-window
+  Turbo round trip. Without it, the flags landed earlier today only record
+  state.
+
+Design refinement:
+- Round-trip in `Causal.Get` rather than mutating cache memory after `Put`.
+  The Get path already builds a View of the cells in the current sequence
+  range, which is exactly the K that FA will consume. Transforming K on the
+  way out avoids in-place mutation hazards (allocator reuse, races on
+  shared cells across sequences) and avoids any cross-batch tracking state.
+
+Implementation:
+- New `Causal.keyResidualOldCount(cachedSize int) int` returns how many
+  leading cells in the active range fall outside the window N. It uses the
+  maximum of `c.curPositions` as the "now" reference and treats a cell as
+  old if its position is at most `now - N`. It defensively returns 0 when
+  any cell positions in the active range are non-monotonic.
+- New `Causal.applyKeyResidualWindow(ctx, key, oldCount, cachedSize) ml.Tensor`
+  splits the key view at oldCount via two `View` calls, runs
+  `old.Cast(KeyResidualBaseDType).Cast(originalDType)` for the round trip,
+  and `Concat`s the round-tripped old with the untouched recent slice on
+  the cell axis.
+- `Causal.Get` calls these helpers right after the existing cell-range
+  view is built. If the residual window is disabled or no cells are old,
+  Get behaves exactly as before.
+
+Tests:
+- `TestKeyResidualOldCount` is a pure-function table-driven test covering:
+  disabled (window=0, baseDType=Other), all recent, leading old subset,
+  edge case window equal to cached size, all-old, curCellRange offsetting,
+  non-monotonic positions falling back to 0, multi-position curPositions
+  using the maximum.
+- Existing `TestSetKeyResidualWindow*` plus `TestKeyLayerDType*` and
+  `TestInitSplit*` tests still pass.
+
+Verification:
+
+```bash
+git diff --check
+```
+
+```bash
+GOCACHE=/tmp/ollama-build-gocache \
+go test -count=1 \
+  ./tools/turboquant/... \
+  ./cmd/turboquant-tokenize \
+  ./cmd/turboquant-eval \
+  ./cmd/turboquant-dump-index \
+  ./cmd/turboquant-select-layers \
+  ./cmd/turboquant-calibrate \
+  ./kvcache \
+  ./ml/nn \
+  ./llm \
+  ./envconfig \
+  ./fs/ggml \
+  ./runner/ollamarunner
+```
+
+Result: all 15 packages PASS.
+
+Open items:
+
+- GPU smoke + Phase 0 eval grid. With `-flash-attention=true` on the Go
+  engine and `qwen2.5:7b`, run `-key-cache-type {f16,q8_0}
+  -key-cache-residual-window {64,128,256} -key-cache-residual-dtype turbo4
+  -value-cache-type turbo4 -reference-kv-cache-type f16` first at
+  `-limit 1` then `-limit 16` then full Phase 0. Document in the README
+  Phase 0 Results section.
+- Verify `ggml_cast` between `f16`/`q8_0` and Turbo* roundtrips correctly
+  on CUDA. CPU paths are likely fine; CUDA cast for Turbo dtypes is the
+  risk surface.
+
+## 2026-04-30 - Residual-window key-protection design
+
+Goal:
+- Build the eval-only experiment proposed in the handoff: keep values Turbo4,
+  keep old keys Turbo4, but let the most recent N key-cache tokens use a higher
+  key dtype (q8_0 or f16). Compare against `kq8-vturbo4` and the adaptive
+  layer preset on the existing Phase 0 snapshot.
+
+Design tradeoffs considered before writing code:
+
+1. Per-position cache mutation (in-place round trip).
+   The cache currently allocates a single key tensor per layer at one dtype.
+   We could allocate at the higher dtype and, after each `Put`, apply a
+   Turbo4 encode-then-decode round trip in place to positions outside the
+   most recent N. The K tensor stays one tensor at the high dtype; only the
+   numerical content of "old" rows is degraded to match Turbo4 representation.
+   Pros: single tensor, FA path unchanged, attention sees a contiguous K.
+   Cons: needs a graph op that reads K, runs Turbo encode/decode, writes K.
+   Memory does not match production runtime memory; the experiment measures
+   accuracy of Turbo4 K representation under the residual-window discipline,
+   not memory savings.
+
+2. Split key storage (recent + old tensors).
+   Allocate `keysOld[layer]` at Turbo4 and `keysRecent[layer]` at the higher
+   dtype, then either fuse them at FA time or run two FA calls and combine.
+   Pros: matches production memory shape. Cons: heavy FA path surgery, two
+   K tensors to mask, needs two FA invocations per layer or a fused kernel.
+   Out of scope for an eval-only experiment.
+
+3. Per-batch global recodec.
+   Treat recent N as "the last N positions of the sequence end" and apply a
+   single Turbo round trip to positions `[0, end-N]` once per batch.
+   Pros: simplest. Cons: within a single prefill batch the per-query window
+   semantics differ from production generation; we would not know whether a
+   regression was caused by the encoding cost or by misaligned window
+   semantics.
+
+Chosen interpretation:
+- Approach 1 (in-place round trip on old positions). This is the closest
+  fidelity to production generation while keeping a single K tensor and
+  avoiding FA surgery. The graph op required is a Turbo encode/decode round
+  trip targeting a slice of the K cache.
+- Window semantics: at every Put, positions where `currentEnd - pos > N` are
+  considered "old" and round-tripped through the configured Turbo dtype.
+  Positions inside the window keep their high-dtype content untouched.
+- Base Turbo dtype is configurable so the same harness can experiment with
+  Turbo4 (matches `kq8-vturbo4` long-term) or future Turbo3/Turbo2 variants.
+- Eval-only: no production runtime path is changed. The flag is wired into
+  `cmd/turboquant-eval` only; the Ollama serve path stays on the existing
+  `kq8-vturbo4` and adaptive-preset behaviors.
+
+Implementation plan, narrow:
+
+a. Add `cmd/turboquant-eval` flags `-key-cache-residual-window N` and
+   `-key-cache-residual-dtype DTYPE` plus parsing and validation tests:
+     - DTYPE must be a Turbo* dtype (matches the "old" content target).
+     - The base key cache type must be a higher precision than DTYPE (the
+       "recent" content target). For now require `f16` or `q8_0`.
+     - Engine must be Go; flash attention must be on.
+     - Cannot combine with per-layer key dtype overrides (they target
+       orthogonal axes; we can revisit composition once the experiment runs).
+
+b. Add `Causal.SetKeyResidualWindow(window int, baseDType ml.DType)` plus
+   matching tests:
+     - Records `KeyResidualWindow` and `KeyResidualBaseDType` on the cache.
+     - Zero window or `ml.DTypeOther` resets the configuration.
+
+c. Wire the eval harness to call `SetKeyResidualWindow` when the new flags
+   are present. The cache method only records state in this commit; the
+   actual graph-op round trip is a follow-up that needs a Turbo encode/decode
+   composition (e.g., a SET_ROWS into a temporary Turbo tensor followed by a
+   dequant op back into the K cache slice).
+
+Open items deferred to a follow-up session:
+
+- The graph op that performs the per-position Turbo round trip on old slots.
+  Likely composition: copy slice -> Turbo SET_ROWS into temp -> dequant back
+  into K cache slice. Needs verification that allocator reuse does not
+  corrupt the source between the encode and the dequant write-back.
+- Eval grid: window N in {0, 64, 128, 256} crossed with residual dtype in
+  {q8_0, f16} on the existing `tools/turboquant/testdata/qwen25_7b_phase0_tokens.json`
+  snapshot using `-reference-kv-cache-type f16`. Compare mean NLL,
+  perplexity, and KL against `kq8-vturbo4` baseline.
+- Decision criterion: only promote to production runtime if a window
+  preset clearly beats `kq8-vturbo4` on full Phase 0 KL with at least the
+  same perplexity at meaningfully lower memory.
+
+Implementation in this commit:
+
+- `kvcache.Causal` gains `KeyResidualWindow` and `KeyResidualBaseDType`
+  fields plus `SetKeyResidualWindow(window int, baseDType ml.DType)`.
+  Zero window or `ml.DTypeOther` resets the configuration. The setter is
+  state-only; FA and Put paths are unchanged.
+- `kvcache.WrapperCache.SetKeyResidualWindow` forwards to wrapped caches
+  matching the existing `SetKeyLayerDTypes` forwarding pattern, so models
+  that compose multiple cache types still see the configuration.
+- `cmd/turboquant-eval` gains `-key-cache-residual-window N` and
+  `-key-cache-residual-dtype DTYPE`. Validation requires
+  `-engine go`, `-flash-attention=true`, a Turbo* residual dtype, an
+  `f16`/`q8_0` recent dtype, and forbids combining with the per-layer key
+  preset/types flags.
+- Result emission echoes `key_cache_residual_window` and
+  `key_cache_residual_dtype` in JSON and text outputs for reproducibility.
+- `tools/turboquant/README.md` documents the experimental flags, their
+  constraints, and the planned eval grid.
+
+Verification:
+
+```bash
+git diff --check
+```
+
+```bash
+GOCACHE=/tmp/ollama-build-gocache \
+go test -count=1 \
+  ./tools/turboquant/... \
+  ./cmd/turboquant-tokenize \
+  ./cmd/turboquant-eval \
+  ./cmd/turboquant-dump-index \
+  ./cmd/turboquant-select-layers \
+  ./cmd/turboquant-calibrate \
+  ./kvcache \
+  ./ml/nn \
+  ./llm \
+  ./envconfig \
+  ./fs/ggml \
+  ./runner/ollamarunner
+```
+
+Result:
+
+```
+ok  	github.com/ollama/ollama/tools/turboquant/dumpindex	0.029s
+ok  	github.com/ollama/ollama/tools/turboquant/eval	0.003s
+ok  	github.com/ollama/ollama/tools/turboquant/layerselect	0.002s
+ok  	github.com/ollama/ollama/tools/turboquant/tests	0.002s
+ok  	github.com/ollama/ollama/cmd/turboquant-tokenize	0.003s
+ok  	github.com/ollama/ollama/cmd/turboquant-eval	0.004s
+ok  	github.com/ollama/ollama/cmd/turboquant-dump-index	0.002s
+ok  	github.com/ollama/ollama/cmd/turboquant-select-layers	0.002s
+ok  	github.com/ollama/ollama/cmd/turboquant-calibrate	0.005s
+ok  	github.com/ollama/ollama/kvcache	0.003s
+ok  	github.com/ollama/ollama/ml/nn	0.003s
+ok  	github.com/ollama/ollama/llm	0.004s
+ok  	github.com/ollama/ollama/envconfig	0.006s
+ok  	github.com/ollama/ollama/fs/ggml	0.005s
+ok  	github.com/ollama/ollama/runner/ollamarunner	0.003s
+```
+
+## 2026-04-30 - Automatic calibration wrapper and artifact
+
+Goal:
+- Turn the manual layer sweep workflow into one command that runs or reuses a
+  sweep, selects layers, validates the selected spec on a larger slice, and
+  writes a reusable JSON artifact.
+
+Implemented:
+- `tools/turboquant/layerselect` contains the reusable CSV selector shared by
+  `cmd/turboquant-select-layers` and `cmd/turboquant-calibrate`.
+- `cmd/turboquant-calibrate` now orchestrates sweep → select → validate →
+  artifact. It records the selected layer spec, sweep/validation commands, and
+  validation metrics.
+- The calibrator parser rebases derived defaults when `-artifact-dir` is
+  supplied: unless explicitly overridden, `-output` becomes
+  `<artifact-dir>/calibration.json` and `-log-dir` becomes
+  `<artifact-dir>/logs`.
+
+Regression covered:
+- `TestParseCalibrationOptionsRebasesDerivedPaths` failed before the parser
+  extraction because `-log-dir` stayed pinned to the timestamped default after
+  a custom `-artifact-dir`.
+- The test now passes and protects the artifact metadata path.
+
+Command run on GPU, reusing the completed 4-sequence sweep:
+
+```bash
+GOCACHE=/tmp/ollama-build-gocache \
+OLLAMA_LIBRARY_PATH=/home/yannik/Work/ollama-build/build/lib/ollama \
+CUDA_VISIBLE_DEVICES=0 \
+go run ./cmd/turboquant-calibrate \
+  -sweep-csv /tmp/turboquant-layer-sweep-limit4-q8_0.csv \
+  -artifact-dir /tmp/turboquant-calibration-qwen25-7b-q4km \
+  -output /tmp/turboquant-calibration-qwen25-7b-q4km/calibration.json \
+  -model qwen2.5:7b \
+  -snapshot tools/turboquant/testdata/qwen25_7b_phase0_tokens.json \
+  -base-kv-cache-type turbo4 \
+  -reference-kv-cache-type f16 \
+  -layer-dtype q8_0 \
+  -top 4 \
+  -sweep-limit 4 \
+  -validate-limit 16 \
+  -num-ctx 1024 \
+  -batch-size 512 \
+  -num-gpu-layers 999
+```
+
+Artifact:
+- Path: `/tmp/turboquant-calibration-qwen25-7b-q4km/calibration.json`
+- Selected key layer spec: `0:q8_0,1:q8_0,3:q8_0,27:q8_0`
+- Validation slice: 16 sequences, 16368 tokens
+- Metrics: `mean_nll=1.99192706`, `perplexity=7.32964486`,
+  `mean_kl=0.05225737`, `duration=75.4s`
+
+Full Phase 0 gate:
+- Path: `/tmp/turboquant-calibration-qwen25-7b-q4km-full/calibration.json`
+- Same selected key layer spec: `0:q8_0,1:q8_0,3:q8_0,27:q8_0`
+- Validation slice: 256 sequences, 261888 tokens
+- Metrics: `mean_nll=2.16333712`, `perplexity=8.70012261`,
+  `mean_kl=0.04249074`, `duration=1159.0s`
+
+Interpretation:
+- The automatic path reproduces the manual adaptive preset result.
+- This is still a model/weight-quantization-specific calibration for
+  `qwen2.5:7b` Q4_K_M, not evidence that the same layer set is optimal for
+  other model quantizations.
+- Compared with full `kq8-vturbo4` (`mean_kl=0.01705642`,
+  `perplexity=8.59223759`), adaptive uses less q8 key storage but is
+  measurably noisier.
+
+Community implementation note:
+- Reviewed <https://github.com/tonbistudio/turboquant-pytorch> after the user
+  pointed to it. The repo's V3 direction is consistent with our measured split
+  results: avoid assuming QJL is the first fix for softmax attention, allocate
+  more precision to keys than values, keep a recent fp16 window when possible,
+  and protect sensitive layers.
+- This reinforces `kq8-vturbo4` as the practical safe preset and suggests the
+  next research branch should test recent-token key protection / residual
+  windows before committing to the full JL residual path from the paper.
+
+Local K/V norm check:
+- Reused `/tmp/tqdump-layers-kv` plus `cmd/turboquant-dump-index` to write
+  `/tmp/turboquant-layer-index.csv`.
+- Wrote per-layer K/V norm stats to `/tmp/turboquant-kv-norms.csv`.
+- Mean K/V norm ratio summary: average `8.40x`, min `0.44x`, max `106.89x`.
+- Highest-ratio layers include 0 (`106.89x`), 1 (`37.69x`), 3 (`15.97x`),
+  and 27 (`5.63x`), which overlaps the selected adaptive key layers.
+- Some late layers invert the asymmetry, so fixed first/last protection is less
+  defensible here than measured layer calibration.
+
 ## 2026-04-29 (later) - Decision memo: Path A (4-bit nibble revert)
 
 Two candidates were on the table after the kernel correctness bug was closed:
@@ -336,6 +1034,3 @@ Kernel correctness bug from handoff: **closed**.
 Quality regression from the QJL WIP: **closed** by reverting to 4-bit
 nibble layout. The 3-bit+QJL design remains available behind
 `TURBO4_USE_4BIT=0` for future research with proper eval infrastructure.
-
-
-

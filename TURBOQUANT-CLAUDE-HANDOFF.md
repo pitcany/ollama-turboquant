@@ -1,4 +1,171 @@
-# TurboQuant CUDA Debug Handoff
+# TurboQuant Claude Code Handoff
+
+Date: 2026-04-30
+Repo: `/home/yannik/Work/ollama-build`
+
+## Current Status
+
+The previous CUDA garbling/debug phase is closed. The current work is no longer
+"find the first GPU mismatch"; it is TurboQuant quality/calibration research on
+top of the corrected Go-engine eval path.
+
+What is now implemented and documented:
+
+- Phase 0 token snapshot and eval tools:
+  - `cmd/turboquant-tokenize`
+  - `cmd/turboquant-eval`
+  - `cmd/turboquant-dump-index`
+  - `tools/turboquant/eval`
+- Split K/V cache dtype support:
+  - `kvcache.Causal.InitSplit`
+  - per-layer key dtype overrides
+  - production preset `OLLAMA_KV_CACHE_TYPE=kq8-vturbo4`
+- Automatic calibration:
+  - `tools/turboquant/layer_sweep.sh`
+  - `cmd/turboquant-select-layers`
+  - `cmd/turboquant-calibrate`
+  - reusable selector package `tools/turboquant/layerselect`
+- Documentation:
+  - `tools/turboquant/README.md` is the canonical user/operator doc for Phase 0
+    tools, commands, presets, and measured results.
+  - `TURBOQUANT-DEBUG-LOG.md` is the chronological evidence log.
+  - This file is the active handoff for Claude Code.
+
+## Key Measurements
+
+All results below are for `qwen2.5:7b` Q4_K_M with
+`tools/turboquant/testdata/qwen25_7b_phase0_tokens.json`, `-num-ctx 1024`,
+`-batch-size 512`, full GPU offload, and f16 reference where KL is reported.
+
+Full 256-sequence Phase 0 results:
+
+| cache | sequences | tokens | mean NLL | perplexity | mean KL | duration |
+|---|---:|---:|---:|---:|---:|---:|
+| llama f16 | 256 | 261888 | 2.14183994 | 8.51509047 | - | 309.0s |
+| `kq8-vturbo4` | 256 | 261888 | 2.15085919 | 8.59223759 | 0.01705642 | 1123.3s |
+| adaptive K q8_0 layers `0,1,3,27` + Turbo4 V | 256 | 261888 | 2.16333712 | 8.70012261 | 0.04249074 | 1159.0s |
+
+Interpretation:
+
+- All-Turbo4 K/V still fails catastrophically.
+- Split runs isolate the failure to Turbo4 key scoring.
+- Turbo4 V is fine when K is f16/q8_0.
+- `kq8-vturbo4` is the practical safe preset.
+- The adaptive preset is full-gate validated but noisier than all-q8 K.
+
+Artifacts:
+
+- 16-sequence calibration:
+  `/tmp/turboquant-calibration-qwen25-7b-q4km/calibration.json`
+- Full 256-sequence adaptive gate:
+  `/tmp/turboquant-calibration-qwen25-7b-q4km-full/calibration.json`
+- Single-layer sweep CSV:
+  `/tmp/turboquant-layer-sweep-limit4-q8_0.csv`
+- Per-layer K/V norm stats:
+  `/tmp/turboquant-kv-norms.csv`
+
+## Community Context
+
+The user pointed to <https://github.com/tonbistudio/turboquant-pytorch>.
+Relevant takeaways from that implementation:
+
+- QJL can be theoretically attractive for raw inner products but harmful under
+  softmax attention because it adds variance.
+- Keys need more precision than values.
+- Recent-token fp16 residual windows help generation.
+- Layer-adaptive protection is useful, but our local K/V norm data is
+  layer-dependent enough that measured calibration is preferable to blindly
+  protecting the first and last N layers.
+
+Local norm check from `/tmp/tqdump-layers-kv`:
+
+- Mean K/V norm ratio average: `8.40x`
+- Min: `0.44x`
+- Max: `106.89x`
+- Highest-ratio layers include `0`, `1`, `3`, and `27`, overlapping the
+  selected adaptive key layers.
+
+## Recommended Next Step
+
+Do a residual-window key-protection experiment before investing further in the
+paper's full JL residual path.
+
+Practical shape:
+
+1. Add a Phase 0 evaluator mode that keeps the most recent N key-cache tokens at
+   a higher key dtype, probably `q8_0` or `f16`, while older key rows remain
+   Turbo4 and values remain Turbo4.
+2. Start in the eval path, not production runtime, so the experiment can be
+   validated without committing to cache-lifetime complexity.
+3. Test a small grid:
+   - no window
+   - recent 64 tokens
+   - recent 128 tokens
+   - recent 256 tokens
+   - compare against `kq8-vturbo4`
+4. Use `-reference-kv-cache-type f16` and the Phase 0 snapshot.
+5. Only promote to production runtime if KL/perplexity justify the added cache
+   machinery.
+
+## Verification Commands From Latest Session
+
+```bash
+git diff --check
+bash -n tools/turboquant/layer_sweep.sh
+
+GOCACHE=/tmp/ollama-build-gocache \
+go test -count=1 \
+  ./tools/turboquant/... \
+  ./cmd/turboquant-tokenize \
+  ./cmd/turboquant-eval \
+  ./cmd/turboquant-dump-index \
+  ./cmd/turboquant-select-layers \
+  ./cmd/turboquant-calibrate \
+  ./kvcache \
+  ./ml/nn \
+  ./llm \
+  ./envconfig \
+  ./fs/ggml \
+  ./runner/ollamarunner
+
+GOCACHE=/tmp/ollama-build-gocache \
+OLLAMA_LIBRARY_PATH=/home/yannik/Work/ollama-build/build/lib/ollama \
+go test -count=1 ./ml/backend/ggml
+```
+
+## Prompt For Claude Code
+
+```text
+We are in /home/yannik/Work/ollama-build working on TurboQuant. Read these files first:
+
+- AGENTS.md
+- TURBOQUANT-CLAUDE-HANDOFF.md
+- tools/turboquant/README.md
+- TURBOQUANT-DEBUG-LOG.md
+- TURBOQUANT-PAPER-IMPLEMENTATION-PLAN.md
+
+Current state:
+- The old CUDA garbling phase is closed.
+- Phase 0 eval/calibration tooling exists and is documented.
+- `kq8-vturbo4` is the practical safe preset: full 256-sequence result is mean_nll=2.15085919, perplexity=8.59223759, mean_kl=0.01705642.
+- Adaptive key-layer preset `0:q8_0,1:q8_0,3:q8_0,27:q8_0` is full-gate validated but noisier: mean_nll=2.16333712, perplexity=8.70012261, mean_kl=0.04249074.
+- Artifacts are in `/tmp/turboquant-calibration-qwen25-7b-q4km-full/calibration.json`, `/tmp/turboquant-layer-sweep-limit4-q8_0.csv`, and `/tmp/turboquant-kv-norms.csv`.
+- The user pointed to https://github.com/tonbistudio/turboquant-pytorch; the useful takeaway is to test key precision, residual windows, and measured layer adaptation before spending more effort on full QJL/JL.
+
+Task:
+Continue with the next research step: design and implement an eval-only residual-window key-protection experiment. Keep values Turbo4, keep old keys Turbo4, but let the most recent N key-cache tokens use a higher dtype such as q8_0 or f16. Start with tests and a narrow implementation path in the eval harness. Do not make production runtime changes until the eval result justifies them.
+
+Important constraints:
+- Do not revert unrelated dirty work.
+- Document every command/result in `TURBOQUANT-DEBUG-LOG.md`.
+- Keep operator-facing instructions and final measured results in `tools/turboquant/README.md`.
+- Use the existing Phase 0 snapshot and f16 reference KL.
+- Verify with focused Go tests and `git diff --check`.
+```
+
+---
+
+# Legacy 2026-04-29 CUDA Debug Handoff
 
 Date: 2026-04-29
 Repo: `/home/yannik/Work/ollama-build`
