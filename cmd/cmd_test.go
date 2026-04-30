@@ -293,6 +293,76 @@ Weigh anchor!
 		}
 	})
 
+	t.Run("kv cache", func(t *testing.T) {
+		var b bytes.Buffer
+		if err := showInfo(&api.ShowResponse{
+			Details: api.ModelDetails{
+				Family:            "test",
+				ParameterSize:     "7B",
+				QuantizationLevel: "Q4_K_M",
+			},
+			KVCache: &api.KVCachePreview{
+				Source:             "manifest:qwen2.5-7b-q4_k_m-adaptive.json",
+				BaseKVCacheType:    "turbo4",
+				KeyCacheLayerTypes: "0:q8_0,27:q8_0",
+				BytesPerKVPairF16:  4,
+				BytesPerKVPair:     1.531,
+				SavedPctVsF16:      61.725,
+			},
+		}, false, &b); err != nil {
+			t.Fatal(err)
+		}
+
+		expect := `  Model
+    architecture    test
+    parameters      7B
+    quantization    Q4_K_M
+
+  KV Cache
+    source                   manifest:qwen2.5-7b-q4_k_m-adaptive.json
+    base_kv_cache_type       turbo4
+    key_cache_layer_types    0:q8_0,27:q8_0
+    bytes_per_kv_pair        1.531 vs 4.000
+    saved_pct_vs_f16         61.7%
+
+`
+
+		trimLinePadding := func(s string) string {
+			lines := strings.Split(s, "\n")
+			for i, line := range lines {
+				lines[i] = strings.TrimRight(line, " \t\r")
+			}
+			return strings.Join(lines, "\n")
+		}
+		if diff := cmp.Diff(trimLinePadding(expect), trimLinePadding(b.String())); diff != "" {
+			t.Errorf("unexpected output (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("kv cache omits empty key cache layer types", func(t *testing.T) {
+		var b bytes.Buffer
+		if err := showInfo(&api.ShowResponse{
+			Details: api.ModelDetails{
+				Family:            "test",
+				ParameterSize:     "7B",
+				QuantizationLevel: "Q4_K_M",
+			},
+			KVCache: &api.KVCachePreview{
+				Source:            "fallback",
+				BaseKVCacheType:   "kq8-vturbo4",
+				BytesPerKVPairF16: 4,
+				BytesPerKVPair:    1.531,
+				SavedPctVsF16:     61.7,
+			},
+		}, false, &b); err != nil {
+			t.Fatal(err)
+		}
+
+		if strings.Contains(b.String(), "key_cache_layer_types") {
+			t.Fatalf("expected empty key_cache_layer_types to be omitted, got:\n%s", b.String())
+		}
+	})
+
 	t.Run("min version", func(t *testing.T) {
 		var b bytes.Buffer
 		if err := showInfo(&api.ShowResponse{

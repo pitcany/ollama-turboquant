@@ -112,7 +112,8 @@ resolution is logged at info level so it is easy to see which path was used.
 `/api/show` includes a static `kv_cache` field summarizing what would happen
 for each model (manifest source, base type, projected per-pair bytes, and
 projected savings vs an f16 baseline). Operators can sanity-check coverage
-without ever running the model.
+without ever running the model. The same preview is shown in the
+`ollama show <model>` CLI output under the `KV Cache` section.
 
 When TurboQuant is configured but the active backend is not CUDA (Metal,
 ROCm, Vulkan, or CPU), the runner downgrades all Turbo* dtypes to `q8_0`

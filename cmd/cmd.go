@@ -1205,6 +1205,19 @@ func showInfo(resp *api.ShowResponse, verbose bool, w io.Writer) error {
 		})
 	}
 
+	if resp.KVCache != nil {
+		tableRender("KV Cache", func() (rows [][]string) {
+			rows = append(rows, []string{"", "source", resp.KVCache.Source})
+			rows = append(rows, []string{"", "base_kv_cache_type", resp.KVCache.BaseKVCacheType})
+			if strings.TrimSpace(resp.KVCache.KeyCacheLayerTypes) != "" {
+				rows = append(rows, []string{"", "key_cache_layer_types", resp.KVCache.KeyCacheLayerTypes})
+			}
+			rows = append(rows, []string{"", "bytes_per_kv_pair", fmt.Sprintf("%.3f vs %.3f", resp.KVCache.BytesPerKVPair, resp.KVCache.BytesPerKVPairF16)})
+			rows = append(rows, []string{"", "saved_pct_vs_f16", fmt.Sprintf("%.1f%%", resp.KVCache.SavedPctVsF16)})
+			return
+		})
+	}
+
 	if resp.Parameters != "" {
 		tableRender("Parameters", func() (rows [][]string) {
 			scanner := bufio.NewScanner(strings.NewReader(resp.Parameters))
