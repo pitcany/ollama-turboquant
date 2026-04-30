@@ -851,6 +851,112 @@ func TestCanResumeSWAMem(t *testing.T) {
 	})
 }
 
+// TestCacheVariantsAcceptSplitInitAndKeyLayerDTypes covers the turboquant
+// runtime contract — InitSplit + SetKeyLayerDTypes — across all four Causal
+// cache shapes. Every constructor in causal.go returns a *Causal so the
+// methods are reachable; this test pins that fact down so a future refactor
+// that splits the cache shapes into independent types cannot regress mixed
+// K/V dtypes for sliding-window or chunked-attention models.
+func TestCacheVariantsAcceptSplitInitAndKeyLayerDTypes(t *testing.T) {
+	variants := []struct {
+		name string
+		ctor func() *Causal
+	}{
+		{"Causal", func() *Causal { return NewCausalCache(nil) }},
+		{"SWA", func() *Causal { return NewSWACache(4, nil) }},
+		{"SWAMem", func() *Causal { return NewSWAMemCache(4, 8, nil) }},
+		{"Chunked", func() *Causal { return NewChunkedAttentionCache(4, nil) }},
+	}
+
+	for _, v := range variants {
+		v := v
+		t.Run(v.name+"/SplitInitKQ80VTurbo4", func(t *testing.T) {
+			backend := &testBackend{}
+			ctx := backend.NewContext()
+			defer ctx.Close()
+
+			cache := v.ctor()
+			defer cache.Close()
+
+			cache.InitSplit(backend, ml.DTypeQ80, ml.DTypeTurbo4, 1, 16, 4)
+			cache.SetLayer(0)
+
+			batch := input.Batch{
+				Positions: []int32{0, 1},
+				Sequences: []int{0, 0},
+			}
+			if err := cache.StartForward(ctx, batch, false); err != nil {
+				t.Fatalf("StartForward() error = %v", err)
+			}
+
+			key := ctx.FromFloats([]float32{1, 2, 3, 4}, 2, 1, 2)
+			value := ctx.FromFloats([]float32{5, 6, 7, 8}, 2, 1, 2)
+			cache.Put(ctx, key, value)
+
+			if got := cache.keys[0].DType(); got != ml.DTypeQ80 {
+				t.Fatalf("storage key dtype = %v, want %v", got, ml.DTypeQ80)
+			}
+			if got := cache.values[0].DType(); got != ml.DTypeTurbo4 {
+				t.Fatalf("storage value dtype = %v, want %v", got, ml.DTypeTurbo4)
+			}
+
+			// Get() returns Views; the View must preserve the storage dtype
+			// because attention kernels dispatch off the tensor dtype.
+			outK, outV, _ := cache.Get(ctx)
+			if got := outK.DType(); got != ml.DTypeQ80 {
+				t.Fatalf("Get() key dtype = %v, want %v", got, ml.DTypeQ80)
+			}
+			if got := outV.DType(); got != ml.DTypeTurbo4 {
+				t.Fatalf("Get() value dtype = %v, want %v", got, ml.DTypeTurbo4)
+			}
+		})
+
+		t.Run(v.name+"/SetKeyLayerDTypesOverridesOneLayer", func(t *testing.T) {
+			backend := &testBackend{}
+			ctx := backend.NewContext()
+			defer ctx.Close()
+
+			cache := v.ctor()
+			defer cache.Close()
+
+			cache.InitSplit(backend, ml.DTypeTurbo4, ml.DTypeTurbo4, 1, 16, 4)
+			cache.SetKeyLayerDTypes(map[int]ml.DType{0: ml.DTypeQ80})
+
+			batch := input.Batch{
+				Positions: []int32{0, 1},
+				Sequences: []int{0, 0},
+			}
+			key := ctx.FromFloats([]float32{1, 2, 3, 4}, 2, 1, 2)
+			value := ctx.FromFloats([]float32{5, 6, 7, 8}, 2, 1, 2)
+
+			cache.SetLayer(0)
+			if err := cache.StartForward(ctx, batch, false); err != nil {
+				t.Fatalf("StartForward(layer 0) error = %v", err)
+			}
+			cache.Put(ctx, key, value)
+
+			cache.SetLayer(1)
+			if err := cache.StartForward(ctx, batch, false); err != nil {
+				t.Fatalf("StartForward(layer 1) error = %v", err)
+			}
+			cache.Put(ctx, key, value)
+
+			if got := cache.keys[0].DType(); got != ml.DTypeQ80 {
+				t.Fatalf("layer 0 key dtype = %v, want %v (override)", got, ml.DTypeQ80)
+			}
+			if got := cache.keys[1].DType(); got != ml.DTypeTurbo4 {
+				t.Fatalf("layer 1 key dtype = %v, want %v (default)", got, ml.DTypeTurbo4)
+			}
+			if got := cache.values[0].DType(); got != ml.DTypeTurbo4 {
+				t.Fatalf("layer 0 value dtype = %v, want %v (V is uniform)", got, ml.DTypeTurbo4)
+			}
+			if got := cache.values[1].DType(); got != ml.DTypeTurbo4 {
+				t.Fatalf("layer 1 value dtype = %v, want %v (V is uniform)", got, ml.DTypeTurbo4)
+			}
+		})
+	}
+}
+
 type testBackend struct {
 	ml.Backend
 	permutedV bool

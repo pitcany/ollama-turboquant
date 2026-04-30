@@ -121,6 +121,49 @@ and logs a warning. There is no silent garbage path.
 Embedding models do not use flash attention; when TurboQuant is configured,
 they fall back to the default f16 KV cache.
 
+#### Supported cache-type matrix
+
+`kq8-vturbo4` and `turboquant-adaptive` both work across every cache
+shape that the Ollama Go engine ships today, because all four
+constructors in `kvcache/causal.go` return the same `*Causal` struct
+and `Causal.InitSplit` / `Causal.SetKeyLayerDTypes` are invoked
+unconditionally by the runner. `WrapperCache` proxies both methods to
+its inner caches and panics if any inner cache cannot accept split
+K/V dtypes.
+
+| Cache shape                  | Constructor                  | Example architectures              | `kq8-vturbo4` | `turboquant-adaptive` |
+|------------------------------|------------------------------|------------------------------------|:-------------:|:---------------------:|
+| Full causal                  | `NewCausalCache`             | qwen2.5, llama3, mistral, ...      | ✅ supported  | ✅ supported          |
+| Sliding window only          | `NewSWACache`                | gemma3n, olmo3, laguna             | ✅ supported  | ✅ supported          |
+| Sliding window + memory      | `NewSWAMemCache`             | gemma4, gpt-oss                    | ✅ supported  | ✅ supported          |
+| Chunked attention            | `NewChunkedAttentionCache`   | llama4                             | ✅ supported  | ✅ supported          |
+| Wrapper (SWA + causal)       | `NewWrapperCache(SWA, Causal)`| gemma2, gemma3                     | ✅ supported  | ✅ supported          |
+
+Test coverage: `kvcache.TestCacheVariantsAcceptSplitInitAndKeyLayerDTypes`
+exercises `InitSplit(K=q8_0, V=turbo4)` and `SetKeyLayerDTypes` on each
+of the four `Causal` constructors and asserts that storage and
+`Get()`-view tensors carry the expected dtypes.
+
+Live smoke commands for the windowed shapes (run on a host with the
+relevant model pulled and a CUDA backend available):
+
+```bash
+# Sliding-window-only:
+OLLAMA_NEW_ENGINE=1 OLLAMA_FLASH_ATTENTION=1 \
+OLLAMA_KV_CACHE_TYPE=kq8-vturbo4 \
+ollama run gemma3:1b "Write a haiku about sliding windows."
+
+# Sliding-window + memory:
+OLLAMA_NEW_ENGINE=1 OLLAMA_FLASH_ATTENTION=1 \
+OLLAMA_KV_CACHE_TYPE=kq8-vturbo4 \
+ollama run gpt-oss:20b "Explain attention in one sentence."
+
+# Chunked attention:
+OLLAMA_NEW_ENGINE=1 OLLAMA_FLASH_ATTENTION=1 \
+OLLAMA_KV_CACHE_TYPE=kq8-vturbo4 \
+ollama run llama4:scout "Summarize this paragraph."
+```
+
 ### Adding a calibration to the bundled manifest
 
 `cmd/turboquant-calibrate` produces a JSON artifact for one model+quant pair.

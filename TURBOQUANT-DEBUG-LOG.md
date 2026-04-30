@@ -1034,3 +1034,101 @@ Kernel correctness bug from handoff: **closed**.
 Quality regression from the QJL WIP: **closed** by reverting to 4-bit
 nibble layout. The 3-bit+QJL design remains available behind
 `TURBO4_USE_4BIT=0` for future research with proper eval infrastructure.
+
+## 2026-04-30 - SWA / SWAMem / ChunkedAttention reachability of split presets
+
+Goal: confirm that `kq8-vturbo4` and `turboquant-adaptive` (which call
+`Causal.InitSplit` and `Causal.SetKeyLayerDTypes` from the runner) work
+correctly under the three non-default cache shapes used by
+sliding-window models (Gemma3, Gemma3n, Olmo3, Laguna), full-SWA-mem
+models (Gemma4, GPT-OSS, Gemma3-extended), and chunked-attention models
+(Llama4).
+
+### Trace findings (no plumbing fix needed)
+
+`kvcache/causal.go:103-141` defines four constructors that all return
+`*Causal` with different scheduling fields populated:
+
+| Constructor                  | Used by                              | Returns   |
+|------------------------------|--------------------------------------|-----------|
+| `NewCausalCache`             | qwen2.5, llama3, mistral, ...        | `*Causal` |
+| `NewSWACache(window, ...)`   | gemma3, gemma3n, olmo3, laguna       | `*Causal` |
+| `NewSWAMemCache(window, mem)`| gemma4, gptoss                       | `*Causal` |
+| `NewChunkedAttentionCache(c)`| llama4                               | `*Causal` |
+
+Because all four share the `Causal` struct, the methods
+`Causal.InitSplit` (`causal.go:147`) and `Causal.SetKeyLayerDTypes`
+(`causal.go:203`) are reachable on every variant. The cache allocator in
+`Causal.Put` (`causal.go:503-549`) uses `c.keyDTypeForLayer(c.curLayer)`
+for K storage (so layer overrides apply per-layer) and `c.ValueDType`
+for V storage (uniform across layers). The SWA/SWAMem/Chunked
+scheduling fields (`swaWindowSize`, `swaMemorySize`, `chunkSize`) only
+gate masking/eviction and never participate in tensor allocation, so
+mixed K/V dtypes are agnostic to the cache shape.
+
+`kvcache/wrapper.go:32-56` proxies `InitSplit` and `SetKeyLayerDTypes`
+to wrapped caches, with an explicit panic if any inner cache cannot
+take split key/value dtypes. Today the only `WrapperCache` users
+(gemma2, gemma3) wrap a `Causal`-derived SWA cache and a `Causal`
+default cache, both of which support split init.
+
+`runner/ollamarunner/cache.go:73-101` then calls these methods on the
+single combined `Cache` interface returned by the model. There is no
+SWA-/Chunked-specific branch that would skip the calibration apply
+step.
+
+Conclusion: no wiring change is required. Both Causal and the three
+windowed variants — including the wrapped variants — already accept
+split K/V dtypes and per-layer K overrides. The risk is purely
+behavioral: the existing covering tests in `kvcache/causal_test.go`
+only exercise `NewCausalCache` for these code paths, so the
+SWA/SWAMem/Chunked entry points were not regression-protected. Added
+`TestCacheVariantsAcceptSplitInitAndKeyLayerDTypes` in this same
+package to cover all four constructors.
+
+### Smoke command for Gemma3 / SWA model (manual followup)
+
+No Gemma3 (or Gemma3n / Olmo3 / Laguna / Gemma4 / GPT-OSS) tag is
+locally available in this workspace, so the live smoke is recorded
+here for whoever has GPU access to run it. The commands assume the
+model has already been pulled with `ollama pull`:
+
+```bash
+# Sliding-window-only (Gemma3 1B fits a 24GB GPU comfortably):
+OLLAMA_NEW_ENGINE=1 \
+OLLAMA_FLASH_ATTENTION=1 \
+OLLAMA_KV_CACHE_TYPE=kq8-vturbo4 \
+ollama run gemma3:1b "Write a haiku about sliding windows."
+
+# SWAMem (Gemma4 / GPT-OSS):
+OLLAMA_NEW_ENGINE=1 \
+OLLAMA_FLASH_ATTENTION=1 \
+OLLAMA_KV_CACHE_TYPE=kq8-vturbo4 \
+ollama run gpt-oss:20b "Explain attention in one sentence."
+
+# ChunkedAttention (Llama4):
+OLLAMA_NEW_ENGINE=1 \
+OLLAMA_FLASH_ATTENTION=1 \
+OLLAMA_KV_CACHE_TYPE=kq8-vturbo4 \
+ollama run llama4:scout "Summarize this paragraph."
+```
+
+Pass criteria for the smoke: output is coherent prose (not garbled
+tokens or repeating fragments), the runner log contains the
+`turboquant: applying calibration` (or for `kq8-vturbo4` the cache
+type echo) line, and there is no panic on `InitSplit`. If the smoke
+fails on any windowed model, the failure mode is most likely model
+selection (CPU fallback, or non-CUDA backend silently downgrading
+turbo4 → q8_0 per the existing operator-guide note), not the cache
+plumbing covered here.
+
+### Verification
+
+```bash
+GOCACHE=/tmp/ollama-build-gocache \
+go test -count=1 -run TestCacheVariantsAcceptSplitInitAndKeyLayerDTypes \
+  ./kvcache
+GOCACHE=/tmp/ollama-build-gocache \
+go test -count=1 ./kvcache ./runner/ollamarunner ./tools/turboquant/...
+```
+
