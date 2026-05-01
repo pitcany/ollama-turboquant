@@ -3,6 +3,205 @@
 Purpose: rigorous, evidence-first log per `TURBOQUANT-CLAUDE-HANDOFF.md`.
 No speculative patches. Each fix must cite the first proven mismatch it explains.
 
+## 2026-04-30 - Long-context Phase 0 validation (8k, 32k, 128k)
+
+Goal: confirm that the two promoted runtime presets (`kq8-vturbo4` and the
+bundled `qwen2.5-7b-q4km-adaptive` calibration) keep their 1k Phase 0
+quality at long contexts. The 256-sequence baseline runs at `num_ctx=1024`,
+so until now there was no evidence that long-context attention does not
+amplify the Turbo4 K/V representation error.
+
+Decision criterion (from the prompt that drove this session): if any
+preset's `mean_kl` at 32k or 128k exceeds 2x the 1k value, treat as a
+long-context regression, identify culprit layers via single-layer sweep at
+the failing context, and propose a path forward (e.g. context-conditional
+adaptive calibration). **Do not silently widen the CI gate.**
+
+### Corpus and snapshots
+
+Same recipe as the 1k snapshot, but expanded so 16 sequences of 131072
+tokens fit:
+
+- WikiText-103-raw `wiki.test.raw` (1.29 MB) + `wiki.valid.raw` (1.15 MB) +
+  first 13 MB of `wiki.train.raw` (`head -c 13631488`).
+- Followed by the same nine repo files (README.md, docs/api.md,
+  docs/development.md, ml/backend/ggml/ggml/src/ggml-turbo-quant.c,
+  ml/backend/ggml/ggml/src/ggml-cuda/fattn-common.cuh,
+  ml/backend/ggml/ggml/src/ggml-cuda/set-rows.cu, ml/nn/attention.go,
+  model/models/qwen2/model.go, runner/llamarunner/runner.go, llama/llama.go),
+  each followed by `\n\n`.
+
+Final corpus is `/tmp/long-context-corpus.txt`,
+`sha256=15a68cb18771a9929627e98e8fc441ccfd9d36157dd97134bd58f286d1c5ffed`,
+size 16336111 bytes.
+
+Snapshot files (16 sequences each, qwen2.5:7b tokenizer):
+
+```text
+tools/turboquant/testdata/qwen25_7b_phase0_tokens_8192.json    1.7 MiB
+tools/turboquant/testdata/qwen25_7b_phase0_tokens_32768.json   6.8 MiB
+tools/turboquant/testdata/qwen25_7b_phase0_tokens_131072.json  27.3 MiB
+                                                       total  ~36 MiB
+```
+
+Total is under the 50 MiB cap from the task spec, so they are committed
+alongside this entry. Reproduction commands are documented in the README
+"Long-context validation" subsection so the snapshots can be regenerated
+deterministically.
+
+### Sequence-count rationale
+
+The task asked for `max_sequences=16`. At 16 sequences:
+
+| ctx | preset | per-seq cost (measured/extrapolated) | wall time | GPU mem |
+|---|---|---:|---:|---|
+| 32k | f16 | 39 s | 10.5 min (measured) | OK |
+| 32k | kq8-vturbo4 + reference | ~217 s | ~58 min (4 seqs) | OK |
+| 32k | adaptive + reference | ~370 s | ~99 min (4 seqs) | OK |
+| 128k | f16 | 216 s | 3.6 min (1 seq, measured) | 12 GB |
+| 128k | kq8-vturbo4 + reference | 1808 s | 30 min (1 seq, measured) | 19 GB |
+| 128k | adaptive + reference | 1808 s+ | ~30-60 min (1 seq) | 19 GB |
+
+Extrapolating to 16 sequences: kq8-vturbo4 at 128k would need ~8 hours,
+adaptive ~16 hours, both blocked by the 24 GB on GPU 0 once an f16
+reference is added (16 × 7.5 GB candidate KV alone exceeds the budget).
+The cap was lowered to 4 sequences at 32k and 1 sequence at 128k. Each
+(length, cache) cell still scores ~131k tokens, matching the per-cell
+token budget of the 256x1024 baseline, so the comparison is
+apples-to-apples on `mean_kl` variance.
+
+### Eval grid
+
+All runs use `-engine go`, `-batch-size 512`, `-num-gpu-layers 999`,
+`-flash-attention=true`, `qwen2.5:7b` Q4_K_M, `CUDA_VISIBLE_DEVICES=0`
+(RTX 4090 24 GB). KL is computed against an in-process f16 reference
+(`-reference-kv-cache-type f16`) for `kq8-vturbo4` and adaptive runs.
+The standalone f16 rows have no reference and therefore no KL.
+
+| ctx | preset | seqs | tokens | mean_nll | perplexity | mean_kl | duration |
+|---:|---|---:|---:|---:|---:|---:|---:|
+| 1024 | f16 (baseline) | 256 | 261888 | 2.14183994 | 8.51509047 | — | 309.0 s |
+| 1024 | `kq8-vturbo4` | 256 | 261888 | 2.15085919 | 8.59223759 | 0.01705642 | 1123.3 s |
+| 1024 | `qwen2.5-7b-q4km-adaptive` | 256 | 261888 | 2.16333712 | 8.70012261 | 0.04249074 | 1159.0 s |
+| 8192 | f16 | 16 | 131056 | 1.85791561 | 6.41036114 | — | 147.0 s |
+| 8192 | `kq8-vturbo4` | 16 | 131056 | 1.86312514 | 6.44384325 | 0.01094024 | 629.8 s |
+| 8192 | `qwen2.5-7b-q4km-adaptive` | 16 | 131056 | 1.87801165 | 6.54048713 | 0.03229139 | 764.2 s |
+| 32768 | f16 | 16 | 524272 | 1.85215080 | 6.37351294 | — | 632.5 s |
+| 32768 | `kq8-vturbo4` | 4 | 131068 | 1.81425508 | 6.13650325 | 0.01094171 | 870.5 s |
+| 32768 | `qwen2.5-7b-q4km-adaptive` | 4 | 131068 | 1.82891201 | 6.22710793 | 0.03238139 | 1486.8 s |
+| 131072 | f16 | 1 | 131071 | 1.82012316 | 6.17261864 | — | 216.1 s |
+| 131072 | `kq8-vturbo4` | 1 | 131071 | 1.82203777 | 6.18444811 | 0.01072263 | 1807.3 s |
+| 131072 | `qwen2.5-7b-q4km-adaptive` | 1 | 131071 | 1.84489020 | 6.32740501 | 0.03838180 | 6488.1 s |
+
+### Regression check
+
+| ctx | preset | 1k_kl | this_kl | ratio | 2x threshold | verdict |
+|---:|---|---:|---:|---:|---:|---|
+| 8192 | `kq8-vturbo4` | 0.01706 | 0.01094 | 0.64x | 0.034 | ok |
+| 8192 | `qwen2.5-7b-q4km-adaptive` | 0.04249 | 0.03229 | 0.76x | 0.085 | ok |
+| 32768 | `kq8-vturbo4` | 0.01706 | 0.01094 | 0.64x | 0.034 | ok |
+| 32768 | `qwen2.5-7b-q4km-adaptive` | 0.04249 | 0.03238 | 0.76x | 0.085 | ok |
+| 131072 | `kq8-vturbo4` | 0.01706 | 0.01072 | 0.63x | 0.034 | ok |
+| 131072 | `qwen2.5-7b-q4km-adaptive` | 0.04249 | 0.03838 | 0.90x | 0.085 | ok |
+
+No regression. Both presets sit below their 1k baseline at every tested
+context length. The `kq8-vturbo4` ratio is essentially flat at ~0.64x;
+the adaptive ratio drifts upward with length, from 0.76x (8k/32k) to
+0.90x at 128k, but stays well under the 2x threshold (2x = 0.085). The
+adaptive drift is consistent with the bundled artifact protecting key
+layers selected at 1k context, where the Q/K interaction differs
+slightly from long-prompt distributions; even so, the headroom is
+intact. The KL averaging over more tokens (a held-out 1024-token slice
+that hits a sensitive layer-0 K row pushes per-token KL up; the same
+row contributes 1/128th as much in a 128k sequence) is consistent with
+why `kq8-vturbo4` looks flat — q8_0 keys do not have a layer-0 hot spot
+at all.
+
+Performance asymmetry observed: the 128k adaptive run took 6488 s versus
+1807 s for `kq8-vturbo4` on the same input (3.6x slowdown). The two
+cache shapes are similar in size, so this is not memory bandwidth.
+Mixed per-layer K dtypes (4 layers q8_0 + 24 layers turbo4) appear to
+defeat some kernel fusion at long context. Documented in the README so
+operators choose `kq8-vturbo4` for latency-sensitive 32k+ contexts.
+
+### Why the long-context numbers are *better* than 1k, not worse
+
+Two effects compound:
+
+1. The 1k baseline contains short, tokenizer-special-heavy sequences
+   (the original Phase 0 corpus is wikitext.test split into 256 chunks of
+   1024). Those chunks oversample sentence and document starts, where
+   Q vectors are atypical and the all-Turbo4 K/V regime has higher
+   error. Long sequences average over many more "in-the-middle" tokens
+   where attention is well-conditioned.
+2. KL is computed per output position and averaged. At 128k the
+   denominator is 128x larger than 1k, so any per-position spike from a
+   sensitive-position interaction is diluted.
+
+This explanation is consistent with the existing layer 0 evidence in the
+1k single-layer sweep (`tools/turboquant/layer_sweep.sh` at LIMIT=4):
+layer 0 carries most of the 1k Turbo4 K error, and layer 0 attention is
+disproportionately stressed at the very start of a sequence.
+
+### Single-layer sweep at long context
+
+Not run. The decision criterion would have triggered a sweep only on
+a 2x KL regression. None of the four (preset, ctx) cells crossed the
+threshold; running a 28-layer sweep at 32k or 128k under the same
+sequence-count budget would have cost ~5 hours per layer set with no
+evidence to motivate the spend. If a future model architecture surfaces
+a regression here, the path forward is:
+
+1. Run `tools/turboquant/layer_sweep.sh` with
+   `SNAPSHOT=tools/turboquant/testdata/qwen25_7b_phase0_tokens_<L>.json`,
+   `NUM_CTX=<L>`, `LIMIT=<n>` matching the 131k-token budget. The script
+   already takes those as env vars.
+2. Compare per-layer KL against the 1k sweep (`/tmp/turboquant-layer-sweep-limit4-q8_0.csv`)
+   to identify layers whose error grows with context.
+3. Emit a context-conditional bundled artifact (a separate
+   `<arch>-<size>-<ftype>-adaptive-longctx.json` next to the existing
+   `manifest.json`) and resolve on `(architecture, file_type, head_dim,
+   num_ctx)` rather than the current `(architecture, file_type,
+   head_dim)` triple. Do not silently widen the CI gate; the gate must
+   keep enforcing the 1k threshold so that a per-context regression
+   surfaces in CI.
+
+### CI gate handling
+
+No change. The Phase 0 CI gate stays at `mean_kl ≤ 0.05` for
+`kq8-vturbo4` and `mean_kl ≤ 0.13` for the adaptive preset. The
+long-context numbers add ~3x measured headroom under those thresholds at
+every length tested; treating that headroom as a license to lower the
+gate would defeat the gate's purpose.
+
+### Files changed
+
+- `tools/turboquant/README.md` — new "Long-context validation" subsection
+  under "Operator Guide" with the measured table, regression-check
+  table, scope/limits, and reproducibility commands.
+- `TURBOQUANT-DEBUG-LOG.md` — this entry.
+- `tools/turboquant/testdata/qwen25_7b_phase0_tokens_8192.json` — new.
+- `tools/turboquant/testdata/qwen25_7b_phase0_tokens_32768.json` — new.
+- `tools/turboquant/testdata/qwen25_7b_phase0_tokens_131072.json` — new.
+
+No runtime code or CI gate code was changed — the task spec explicitly
+forbids both for this session.
+
+### Verification
+
+```bash
+GOCACHE=/tmp/ollama-build-gocache \
+go test -count=1 \
+  ./tools/turboquant/... \
+  ./cmd/turboquant-tokenize ./cmd/turboquant-eval \
+  ./cmd/turboquant-dump-index ./cmd/turboquant-select-layers \
+  ./cmd/turboquant-calibrate \
+  ./kvcache ./ml/nn ./llm ./envconfig ./fs/ggml ./runner/ollamarunner
+git diff --check
+```
+
+All 16 packages PASS, `git diff --check` clean.
+
 ## 2026-04-30 - Promote safe presets to production runtime
 
 Goal: make the two Phase-0-validated KV cache configurations available as
