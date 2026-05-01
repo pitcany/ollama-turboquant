@@ -1,0 +1,590 @@
+# Instincts generated from https://github.com/pitcany/ollama-turboquant
+# Generated: 2026-05-01T18:20:15.125Z
+# Version: 2.0
+# NOTE: This file supplements (does not replace) any existing curated instincts.
+# High-confidence manually curated instincts should be preserved alongside these.
+
+---
+id: ollama-turboquant-commit-conventional
+trigger: "when writing a commit message"
+confidence: 0.85
+domain: git
+source: repo-analysis
+source_repo: https://github.com/pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Commit Conventional
+
+## Action
+
+Use conventional commit format with prefixes: feat, docs, fix, test, style
+
+## Evidence
+
+- 20 commits analyzed
+- Detected conventional commit pattern
+- Examples: docs(turboquant): plan for Turbo5/Turbo6 kernels + kturbo6-vturbo4 preset, feat(turboquant): Lloyd-Max centroid generator for Turbo2..6
+
+---
+id: ollama-turboquant-commit-length
+trigger: "when writing a commit message"
+confidence: 0.6
+domain: git
+source: repo-analysis
+source_repo: https://github.com/pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Commit Length
+
+## Action
+
+Write moderate-length commit messages (~65 characters)
+
+## Evidence
+
+- Average commit message length: 65 chars
+- Based on 20 commits
+
+---
+id: ollama-turboquant-naming-files
+trigger: "when creating a new file"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Naming Files
+
+## Action
+
+Use camelCase naming convention
+
+## Evidence
+
+- Analyzed file naming patterns in repository
+- Dominant pattern: camelCase
+
+---
+id: ollama-turboquant-import-relative
+trigger: "when importing modules"
+confidence: 0.75
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Import Relative
+
+## Action
+
+Use relative imports for project files
+
+## Evidence
+
+- Import analysis shows relative import pattern
+- Example: import { x } from '../lib/x'
+
+---
+id: ollama-turboquant-export-style
+trigger: "when exporting from a module"
+confidence: 0.7
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Export Style
+
+## Action
+
+Prefer named exports
+
+## Evidence
+
+- Export pattern analysis
+- Dominant style: named
+
+---
+id: ollama-turboquant-test-separate
+trigger: "when writing tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Test Separate
+
+## Action
+
+Place tests in the tests/ or __tests__/ directory, mirroring src structure
+
+## Evidence
+
+- Separate test directory pattern detected
+- Tests live in dedicated test folders
+
+---
+id: ollama-turboquant-workflow-feature-development
+trigger: "when implementing a new feature"
+confidence: 0.9
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Workflow Feature Development
+
+## Action
+
+Follow the feature-development workflow:
+1. Add feature implementation
+2. Add tests for feature
+3. Update documentation
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~23x per month
+- Files: **/*.test.*
+
+---
+id: ollama-turboquant-workflow-update-centroid-tables-and-documentation
+trigger: "when doing update centroid tables and documentation"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Workflow Update Centroid Tables And Documentation
+
+## Action
+
+Follow the update-centroid-tables-and-documentation workflow:
+1. Edit or regenerate centroid tables using lloyd_max.py for the relevant bit widths.
+2. Update tools/turboquant/centroids/README.md to document changes, discrepancies, or methodology.
+3. Modify tools/turboquant/centroids/lloyd_max.py to improve algorithms, add features (e.g., multi-restart), or fix bugs.
+4. Re-emit the relevant centroid text files (e.g., turbo5_centroids.txt, turbo6_centroids.txt).
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: tools/turboquant/centroids/README.md, tools/turboquant/centroids/lloyd_max.py, tools/turboquant/centroids/turbo5_centroids.txt
+
+---
+id: ollama-turboquant-workflow-add-new-turboquant-dtype-support-in-ggml
+trigger: "when doing add new turboquant dtype support in ggml"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Workflow Add New Turboquant Dtype Support In Ggml
+
+## Action
+
+Follow the add-new-turboquant-dtype-support-in-ggml workflow:
+1. Add new type enums and block layouts in ggml.h and ggml-common.h.
+2. Add centroid and midpoint tables to ggml-turbo-quant.c.
+3. Implement CPU quantize/dequantize logic for the new dtype in ggml-turbo-quant.c.
+4. Register the new dtype in CPU type traits in ggml-quants.h, ggml.c, and ggml-cpu/ggml-cpu.c.
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: ml/backend/ggml/ggml/include/ggml.h, ml/backend/ggml/ggml/src/ggml-common.h, ml/backend/ggml/ggml/src/ggml-turbo-quant.c
+
+---
+id: ollama-turboquant-workflow-add-cuda-support-for-new-turboquant-dtype
+trigger: "when doing add cuda support for new turboquant dtype"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Workflow Add Cuda Support For New Turboquant Dtype
+
+## Action
+
+Follow the add-cuda-support-for-new-turboquant-dtype workflow:
+1. Implement dequantize_block_turbo{n}_0 and quantize_f32_turbo{n}_0_block in ggml-cuda/convert.cu and turbo-quant.cuh.
+2. Add set-rows quantize kernel for the dtype in set-rows.cu.
+3. Add or update flash attention vector inner product logic for the dtype in fattn-common.cuh, fattn-vec.cuh, fattn.cu, and register template instances.
+4. Optionally, optimize (vectorize) inner product logic for performance.
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: ml/backend/ggml/ggml/src/ggml-cuda/convert.cu, ml/backend/ggml/ggml/src/ggml-cuda/turbo-quant.cuh, ml/backend/ggml/ggml/src/ggml-cuda/set-rows.cu
+
+---
+id: ollama-turboquant-workflow-add-or-promote-turboquant-preset-and-wire-through-stack
+trigger: "when doing add or promote turboquant preset and wire through stack"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Workflow Add Or Promote Turboquant Preset And Wire Through Stack
+
+## Action
+
+Follow the add-or-promote-turboquant-preset-and-wire-through-stack workflow:
+1. Add or update preset in runner/ollamarunner/cache.go and cache_test.go.
+2. Wire new dtypes and preset through ml.DType, backend.go, fs/ggml/ggml.go, and related test files.
+3. Add or update preset in cmd/turboquant-eval/main.go for the eval harness.
+4. Add, update, or remove feature gates (e.g., OLLAMA_TURBOQUANT_K6_PREVIEW) in envconfig/config.go and llm/server.go.
+5. Update or remove related tests (e.g., llm/server_test.go).
+6. Document or log Phase 0 results in TURBOQUANT-DEBUG-LOG.md.
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: envconfig/config.go, fs/ggml/ggml.go, fs/ggml/ggml_test.go
+
+---
+id: ollama-turboquant-workflow-update-or-improve-documentation-and-plans
+trigger: "when doing update or improve documentation and plans"
+confidence: 0.65
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Workflow Update Or Improve Documentation And Plans
+
+## Action
+
+Follow the update-or-improve-documentation-and-plans workflow:
+1. Edit or add markdown files in docs/superpowers/plans/ to outline new kernels, presets, or implementation phases.
+2. Update README.md files in tools/turboquant/ to clarify methodology, document discrepancies, or provide build instructions.
+3. Document results or smoke test outcomes in TURBOQUANT-DEBUG-LOG.md.
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~3x per month
+- Files: docs/superpowers/plans/*.md, tools/turboquant/centroids/README.md, tools/turboquant/README.md
+
+---
+id: ollama-turboquant-instinct-naming-files
+trigger: "When creating or renaming a file"
+confidence: 0.85
+domain: code-style
+source: repo-analysis
+source_repo: pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Instinct Naming Files
+
+## Action
+
+Use camelCase for file names
+
+## Evidence
+
+- Pattern in codeStyle.namingConventions.files
+- Observed in tools/turboquant/centroids/lloyd_max.py
+
+---
+id: ollama-turboquant-instinct-naming-functions
+trigger: "When defining a function"
+confidence: 0.85
+domain: code-style
+source: repo-analysis
+source_repo: pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Instinct Naming Functions
+
+## Action
+
+Use camelCase for function names
+
+## Evidence
+
+- Pattern in codeStyle.namingConventions.functions
+
+---
+id: ollama-turboquant-instinct-naming-classes
+trigger: "When defining a class or struct"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Instinct Naming Classes
+
+## Action
+
+Use PascalCase for class names
+
+## Evidence
+
+- Pattern in codeStyle.namingConventions.classes
+
+---
+id: ollama-turboquant-instinct-naming-constants
+trigger: "When defining a constant"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Instinct Naming Constants
+
+## Action
+
+Use SCREAMING_SNAKE_CASE for constant names
+
+## Evidence
+
+- Pattern in codeStyle.namingConventions.constants
+
+---
+id: ollama-turboquant-instinct-import-style
+trigger: "When importing modules"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Instinct Import Style
+
+## Action
+
+Use relative imports
+
+## Evidence
+
+- Pattern in codeStyle.importStyle
+
+---
+id: ollama-turboquant-instinct-export-style
+trigger: "When exporting symbols"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Instinct Export Style
+
+## Action
+
+Use named exports
+
+## Evidence
+
+- Pattern in codeStyle.exportStyle
+
+---
+id: ollama-turboquant-instinct-test-location
+trigger: "When adding tests for a module"
+confidence: 0.85
+domain: testing
+source: repo-analysis
+source_repo: pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Instinct Test Location
+
+## Action
+
+Place test files in a separate test location (not inline with source)
+
+## Evidence
+
+- Pattern in architecture.folderStructure.testLocation
+- Files like fs/ggml/ggml_test.go
+
+---
+id: ollama-turboquant-instinct-test-pattern
+trigger: "When implementing a new feature"
+confidence: 0.9
+domain: testing
+source: repo-analysis
+source_repo: pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Instinct Test Pattern
+
+## Action
+
+Add corresponding test files matching the feature (e.g., *.test.*), following the commit sequence: implement feature, then add tests
+
+## Evidence
+
+- Workflow feature-development
+- Commit sequence: Add feature implementation -> Add tests for feature
+
+---
+id: ollama-turboquant-instinct-test-mse-assert
+trigger: "When testing quantization kernels"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Instinct Test Mse Assert
+
+## Action
+
+Assert MSE bounds in test files
+
+## Evidence
+
+- Commit: test(turboquant): block_error.cpp covers Turbo5/Turbo6 and asserts MSE bounds
+
+---
+id: ollama-turboquant-instinct-git-commit-format
+trigger: "When writing a commit message"
+confidence: 0.95
+domain: git
+source: repo-analysis
+source_repo: pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Instinct Git Commit Format
+
+## Action
+
+Use conventional commit format: <type>(<scope>): <description>, with types feat, docs, fix, test, style, perf
+
+## Evidence
+
+- Pattern in commits.type and prefixes
+- Examples in commit history
+
+---
+id: ollama-turboquant-instinct-git-commit-length
+trigger: "When writing a commit message"
+confidence: 0.8
+domain: git
+source: repo-analysis
+source_repo: pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Instinct Git Commit Length
+
+## Action
+
+Keep commit message length around 65 characters
+
+## Evidence
+
+- Pattern in commits.averageLength
+
+---
+id: ollama-turboquant-instinct-update-centroids
+trigger: "When adding or updating TurboQuant centroid tables or improving centroid generation logic"
+confidence: 0.95
+domain: workflow
+source: repo-analysis
+source_repo: pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Instinct Update Centroids
+
+## Action
+
+Regenerate centroid tables with lloyd_max.py, update README.md, modify lloyd_max.py as needed, and re-emit centroid text files
+
+## Evidence
+
+- Workflow: update-centroid-tables-and-documentation
+- Files: tools/turboquant/centroids/lloyd_max.py, turbo5_centroids.txt, turbo6_centroids.txt
+
+---
+id: ollama-turboquant-instinct-add-turboquant-dtype
+trigger: "When implementing a new TurboQuant bit width in the GGML backend"
+confidence: 0.95
+domain: workflow
+source: repo-analysis
+source_repo: pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Instinct Add Turboquant Dtype
+
+## Action
+
+Add type enums and block layouts, centroid/midpoint tables, quantize/dequantize logic, and register new dtype in GGML backend files
+
+## Evidence
+
+- Workflow: add-new-turboquant-dtype-support-in-ggml
+- Files: ggml.h, ggml-common.h, ggml-turbo-quant.c, ggml-quants.h, ggml.c, ggml-cpu.c
+
+---
+id: ollama-turboquant-instinct-add-cuda-turboquant
+trigger: "When enabling CUDA support for a new TurboQuant dtype"
+confidence: 0.9
+domain: workflow
+source: repo-analysis
+source_repo: pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Instinct Add Cuda Turboquant
+
+## Action
+
+Implement CUDA kernels for dequantization/quantization, update flash attention logic, and register template instances
+
+## Evidence
+
+- Workflow: add-cuda-support-for-new-turboquant-dtype
+- Files: convert.cu, turbo-quant.cuh, set-rows.cu, fattn-common.cuh, fattn-vec.cuh, fattn.cu, template-instances
+
+---
+id: ollama-turboquant-instinct-add-turboquant-preset
+trigger: "When introducing or promoting a TurboQuant preset"
+confidence: 0.92
+domain: workflow
+source: repo-analysis
+source_repo: pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Instinct Add Turboquant Preset
+
+## Action
+
+Add/update preset in cache.go, wire through stack (ml.DType, backend.go, ggml.go), update eval harness, manage feature gates, update tests, and document in debug log
+
+## Evidence
+
+- Workflow: add-or-promote-turboquant-preset-and-wire-through-stack
+- Files: cache.go, backend.go, ggml.go, config.go, server.go, TURBOQUANT-DEBUG-LOG.md
+
+---
+id: ollama-turboquant-instinct-update-docs
+trigger: "When planning new work, updating implementation plans, or clarifying technical discrepancies"
+confidence: 0.85
+domain: workflow
+source: repo-analysis
+source_repo: pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Instinct Update Docs
+
+## Action
+
+Edit/add markdown files in docs/superpowers/plans/, update README.md, and document results in TURBOQUANT-DEBUG-LOG.md
+
+## Evidence
+
+- Workflow: update-or-improve-documentation-and-plans
+- Files: docs/superpowers/plans/*.md, tools/turboquant/centroids/README.md, TURBOQUANT-DEBUG-LOG.md
+
