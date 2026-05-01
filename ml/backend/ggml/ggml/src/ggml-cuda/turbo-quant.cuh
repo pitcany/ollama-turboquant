@@ -351,6 +351,164 @@ static __device__ __forceinline__ float turbo4_dequant_element(
     return TURBO_CENTROIDS_4BIT[idx] * norm;
 }
 
+// ---- 5-bit centroids (Lloyd-Max for N(0, 1/128), seed=20260501) ----
+
+static __constant__ float TURBO_CENTROIDS_5BIT[32] = {
+    -0.285946f, -0.235787f, -0.203018f, -0.177688f,
+    -0.156562f, -0.138024f, -0.121413f, -0.106196f,
+    -0.091982f, -0.078555f, -0.065697f, -0.053294f,
+    -0.041209f, -0.029378f, -0.017684f, -0.006125f,
+     0.005429f,  0.017029f,  0.028743f,  0.040661f,
+     0.052830f,  0.065351f,  0.078333f,  0.091924f,
+     0.106325f,  0.121789f,  0.138637f,  0.157399f,
+     0.178968f,  0.204693f,  0.238249f,  0.289131f
+};
+
+static __constant__ float TURBO_MID_5BIT[31] = {
+    -0.260866f, -0.219402f, -0.190353f, -0.167125f,
+    -0.147293f, -0.129719f, -0.113805f, -0.099089f,
+    -0.085269f, -0.072126f, -0.059496f, -0.047252f,
+    -0.035294f, -0.023531f, -0.011905f, -0.000348f,
+     0.011229f,  0.022886f,  0.034702f,  0.046745f,
+     0.059091f,  0.071842f,  0.085128f,  0.099124f,
+     0.114057f,  0.130213f,  0.148018f,  0.168183f,
+     0.191831f,  0.221471f,  0.263690f
+};
+
+static __device__ __forceinline__ uint8_t turbo_nearest_centroid_5bit(float val) {
+    int i = 0;
+    #pragma unroll
+    for (; i < 31; i++) {
+        if (val < TURBO_MID_5BIT[i]) return (uint8_t)i;
+    }
+    return 31;
+}
+
+// Per-block quantize for turbo5 (128 elements, expects already-rotated input).
+// Bit-packed 5-bit indices into qs[80] via a 32-bit accumulator (LSB-first).
+static __device__ void quantize_f32_turbo5_0_block(const float * __restrict__ src,
+                                                    block_turbo5_0 * __restrict__ dst) {
+    #pragma unroll
+    for (int j = 0; j < QK_TURBO5 * 5 / 8; j++) dst->qs[j] = 0;
+
+    uint32_t acc = 0;
+    int bits = 0;
+    int qpos = 0;
+    #pragma unroll
+    for (int j = 0; j < QK_TURBO5; j++) {
+        uint8_t idx = turbo_nearest_centroid_5bit(src[j]);
+        acc |= ((uint32_t)(idx & 0x1F)) << bits;
+        bits += 5;
+        while (bits >= 8) {
+            dst->qs[qpos++] = (uint8_t)(acc & 0xFF);
+            acc >>= 8;
+            bits -= 8;
+        }
+    }
+    // 128 * 5 = 640 bits = 80 bytes: bits == 0 here, no tail byte.
+}
+
+// Inline dequant helper: extract one float from turbo5 block at column j.
+static __device__ __forceinline__ float turbo5_dequant_element(
+        const block_turbo5_0 * __restrict__ x, int j, float norm) {
+    const int bit_off  = j * 5;
+    const int byte_idx = bit_off / 8;
+    const int bit_pos  = bit_off % 8;
+    uint16_t raw = (uint16_t)x->qs[byte_idx];
+    if (byte_idx + 1 < QK_TURBO5 * 5 / 8) {
+        raw |= (uint16_t)x->qs[byte_idx + 1] << 8;
+    }
+    uint8_t idx = (raw >> bit_pos) & 0x1F;
+    return TURBO_CENTROIDS_5BIT[idx] * norm;
+}
+
+// ---- 6-bit centroids (Lloyd-Max for N(0, 1/128), seed=20260501) ----
+
+static __constant__ float TURBO_CENTROIDS_6BIT[64] = {
+    -0.327437f, -0.284078f, -0.255606f, -0.233525f,
+    -0.215819f, -0.200688f, -0.187341f, -0.175216f,
+    -0.164210f, -0.153999f, -0.144379f, -0.135361f,
+    -0.126790f, -0.118594f, -0.110736f, -0.103112f,
+    -0.095751f, -0.088629f, -0.081715f, -0.074960f,
+    -0.068341f, -0.061863f, -0.055458f, -0.049171f,
+    -0.042989f, -0.036899f, -0.030878f, -0.024898f,
+    -0.018954f, -0.013056f, -0.007228f, -0.001401f,
+     0.004412f,  0.010200f,  0.015970f,  0.021799f,
+     0.027649f,  0.033535f,  0.039479f,  0.045485f,
+     0.051582f,  0.057717f,  0.063950f,  0.070345f,
+     0.076853f,  0.083555f,  0.090426f,  0.097493f,
+     0.104808f,  0.112369f,  0.120267f,  0.128476f,
+     0.137041f,  0.146098f,  0.155672f,  0.166015f,
+     0.177159f,  0.189370f,  0.202807f,  0.218014f,
+     0.235939f,  0.257616f,  0.286749f,  0.331903f
+};
+
+static __constant__ float TURBO_MID_6BIT[63] = {
+    -0.305758f, -0.269842f, -0.244566f, -0.224672f,
+    -0.208254f, -0.194015f, -0.181279f, -0.169713f,
+    -0.159104f, -0.149189f, -0.139870f, -0.131076f,
+    -0.122692f, -0.114665f, -0.106924f, -0.099432f,
+    -0.092190f, -0.085172f, -0.078338f, -0.071651f,
+    -0.065102f, -0.058660f, -0.052315f, -0.046080f,
+    -0.039944f, -0.033888f, -0.027888f, -0.021926f,
+    -0.016005f, -0.010142f, -0.004314f,  0.001506f,
+     0.007306f,  0.013085f,  0.018884f,  0.024724f,
+     0.030592f,  0.036507f,  0.042482f,  0.048533f,
+     0.054649f,  0.060834f,  0.067148f,  0.073599f,
+     0.080204f,  0.086991f,  0.093960f,  0.101151f,
+     0.108589f,  0.116318f,  0.124371f,  0.132758f,
+     0.141569f,  0.150885f,  0.160844f,  0.171587f,
+     0.183265f,  0.196088f,  0.210411f,  0.226977f,
+     0.246778f,  0.272183f,  0.309326f
+};
+
+static __device__ __forceinline__ uint8_t turbo_nearest_centroid_6bit(float val) {
+    int i = 0;
+    #pragma unroll
+    for (; i < 63; i++) {
+        if (val < TURBO_MID_6BIT[i]) return (uint8_t)i;
+    }
+    return 63;
+}
+
+// Per-block quantize for turbo6 (128 elements, expects already-rotated input).
+// Bit-packed 6-bit indices into qs[96] via a 32-bit accumulator (LSB-first).
+static __device__ void quantize_f32_turbo6_0_block(const float * __restrict__ src,
+                                                    block_turbo6_0 * __restrict__ dst) {
+    #pragma unroll
+    for (int j = 0; j < QK_TURBO6 * 6 / 8; j++) dst->qs[j] = 0;
+
+    uint32_t acc = 0;
+    int bits = 0;
+    int qpos = 0;
+    #pragma unroll
+    for (int j = 0; j < QK_TURBO6; j++) {
+        uint8_t idx = turbo_nearest_centroid_6bit(src[j]);
+        acc |= ((uint32_t)(idx & 0x3F)) << bits;
+        bits += 6;
+        while (bits >= 8) {
+            dst->qs[qpos++] = (uint8_t)(acc & 0xFF);
+            acc >>= 8;
+            bits -= 8;
+        }
+    }
+    // 128 * 6 = 768 bits = 96 bytes: bits == 0 here, no tail byte.
+}
+
+// Inline dequant helper: extract one float from turbo6 block at column j.
+static __device__ __forceinline__ float turbo6_dequant_element(
+        const block_turbo6_0 * __restrict__ x, int j, float norm) {
+    const int bit_off  = j * 6;
+    const int byte_idx = bit_off / 8;
+    const int bit_pos  = bit_off % 8;
+    uint16_t raw = (uint16_t)x->qs[byte_idx];
+    if (byte_idx + 1 < QK_TURBO6 * 6 / 8) {
+        raw |= (uint16_t)x->qs[byte_idx + 1] << 8;
+    }
+    uint8_t idx = (raw >> bit_pos) & 0x3F;
+    return TURBO_CENTROIDS_6BIT[idx] * norm;
+}
+
 // ---- Nearest 3-bit centroid index ----
 
 static __device__ __forceinline__ uint8_t turbo_nearest_centroid_3bit(float val) {

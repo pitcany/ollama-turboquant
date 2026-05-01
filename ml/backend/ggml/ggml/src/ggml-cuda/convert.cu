@@ -650,6 +650,30 @@ static __global__ void dequantize_block_turbo4_0(const void * __restrict__ vx, d
 }
 
 template <typename dst_t>
+static __global__ void dequantize_block_turbo5_0(const void * __restrict__ vx, dst_t * __restrict__ y, const int64_t k) {
+    const int64_t i = (int64_t)blockDim.x * blockIdx.x + threadIdx.x;
+    if (i >= k) return;
+
+    const block_turbo5_0 * x = (const block_turbo5_0 *) vx;
+    const int64_t ib = i / QK_TURBO5;
+    const int     j  = i % QK_TURBO5;
+    const float norm = __half2float(x[ib].norm);
+    y[i] = ggml_cuda_cast<dst_t>(turbo5_dequant_element(&x[ib], j, norm));
+}
+
+template <typename dst_t>
+static __global__ void dequantize_block_turbo6_0(const void * __restrict__ vx, dst_t * __restrict__ y, const int64_t k) {
+    const int64_t i = (int64_t)blockDim.x * blockIdx.x + threadIdx.x;
+    if (i >= k) return;
+
+    const block_turbo6_0 * x = (const block_turbo6_0 *) vx;
+    const int64_t ib = i / QK_TURBO6;
+    const int     j  = i % QK_TURBO6;
+    const float norm = __half2float(x[ib].norm);
+    y[i] = ggml_cuda_cast<dst_t>(turbo6_dequant_element(&x[ib], j, norm));
+}
+
+template <typename dst_t>
 static void dequantize_row_turbo2_0_cuda(const void * vx, dst_t * y, const int64_t k, cudaStream_t stream) {
     const int num_blocks = (k + CUDA_DEQUANTIZE_BLOCK_SIZE - 1) / CUDA_DEQUANTIZE_BLOCK_SIZE;
     dequantize_block_turbo2_0<<<num_blocks, CUDA_DEQUANTIZE_BLOCK_SIZE, 0, stream>>>(vx, y, k);
@@ -665,6 +689,18 @@ template <typename dst_t>
 static void dequantize_row_turbo4_0_cuda(const void * vx, dst_t * y, const int64_t k, cudaStream_t stream) {
     const int num_blocks = (k + CUDA_DEQUANTIZE_BLOCK_SIZE - 1) / CUDA_DEQUANTIZE_BLOCK_SIZE;
     dequantize_block_turbo4_0<<<num_blocks, CUDA_DEQUANTIZE_BLOCK_SIZE, 0, stream>>>(vx, y, k);
+}
+
+template <typename dst_t>
+static void dequantize_row_turbo5_0_cuda(const void * vx, dst_t * y, const int64_t k, cudaStream_t stream) {
+    const int num_blocks = (k + CUDA_DEQUANTIZE_BLOCK_SIZE - 1) / CUDA_DEQUANTIZE_BLOCK_SIZE;
+    dequantize_block_turbo5_0<<<num_blocks, CUDA_DEQUANTIZE_BLOCK_SIZE, 0, stream>>>(vx, y, k);
+}
+
+template <typename dst_t>
+static void dequantize_row_turbo6_0_cuda(const void * vx, dst_t * y, const int64_t k, cudaStream_t stream) {
+    const int num_blocks = (k + CUDA_DEQUANTIZE_BLOCK_SIZE - 1) / CUDA_DEQUANTIZE_BLOCK_SIZE;
+    dequantize_block_turbo6_0<<<num_blocks, CUDA_DEQUANTIZE_BLOCK_SIZE, 0, stream>>>(vx, y, k);
 }
 
 template <typename src_t, typename dst_t>
@@ -764,6 +800,10 @@ to_fp16_cuda_t ggml_get_to_fp16_cuda(ggml_type type) {
             return dequantize_row_turbo3_0_cuda;
         case GGML_TYPE_TURBO4_0:
             return dequantize_row_turbo4_0_cuda;
+        case GGML_TYPE_TURBO5_0:
+            return dequantize_row_turbo5_0_cuda;
+        case GGML_TYPE_TURBO6_0:
+            return dequantize_row_turbo6_0_cuda;
         case GGML_TYPE_F32:
             return convert_unary_cont_cuda<float>;
         case GGML_TYPE_BF16:
@@ -821,6 +861,10 @@ to_fp32_cuda_t ggml_get_to_fp32_cuda(ggml_type type) {
             return dequantize_row_turbo3_0_cuda;
         case GGML_TYPE_TURBO4_0:
             return dequantize_row_turbo4_0_cuda;
+        case GGML_TYPE_TURBO5_0:
+            return dequantize_row_turbo5_0_cuda;
+        case GGML_TYPE_TURBO6_0:
+            return dequantize_row_turbo6_0_cuda;
         case GGML_TYPE_F16:
             return convert_unary_cont_cuda<half>;
         case GGML_TYPE_BF16:
