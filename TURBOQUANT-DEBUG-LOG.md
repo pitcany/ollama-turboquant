@@ -3,6 +3,195 @@
 Purpose: rigorous, evidence-first log per `TURBOQUANT-CLAUDE-HANDOFF.md`.
 No speculative patches. Each fix must cite the first proven mismatch it explains.
 
+## 2026-05-01 - HybridCache split init: lift qwen3.5/3.6/lfm2/nemotronh to tier 1/2
+
+Goal: Close the open item from the 2026-04-30 "qwen3.6 launch: three
+stacked bugs" entry — `*HybridCache` did not implement `InitSplit` /
+`SetKeyLayerDTypes`, so the runner's `initKVCache` fallback in
+`runner/ollamarunner/cache.go:72-114` fired the
+`"cache does not support split key/value dtypes"` warning and demoted
+hybrid models from tier-1 (`kq8-vturbo4`, ~62%) and tier-2 (adaptive,
+~72%) KV savings down to tier-3 (uniform q8_0, 50%).
+
+### Where the implementation actually lives
+
+The naming `*HybridCache` (in `model/models/qwen3next/cache.go:16-19`,
+`model/models/lfm2/cache.go:18-20`,
+`model/models/nemotronh/cache.go:20-22`) suggested the methods should
+go on those types directly. They do not — each `HybridCache` is a
+zero-state wrapper around `*kvcache.Recurrent`:
+
+```go
+type HybridCache struct {
+    *kvcache.Recurrent
+}
+```
+
+`Recurrent` itself owns the embedded `*Causal` sub-cache that stores
+attention K/V (`kvcache/recurrent.go:42-45`). The conv1d state
+(`convBuffer`, `kvcache/recurrent.go:584-596`) and the SSM/recurrent
+state (`recurrentBuffer`, `kvcache/recurrent.go:598-610`) are both
+hardcoded to `ml.DTypeF32` — they have no K/V-split semantics and the
+prompt's "ignore K/V split where semantics don't match" rule applies
+literally to them.
+
+That meant the right place for `InitSplit` and `SetKeyLayerDTypes` was
+on `*kvcache.Recurrent`. With the methods there, all three hybrid
+wrappers pick them up through Go method promotion without any code
+change in the model packages, and the runner's interface assertion
+(`cache.(interface{ InitSplit(...) })`) succeeds for `*HybridCache`.
+Adding the methods on the wrappers themselves would have required
+duplicating identical code in three places and would not have given
+any new model the feature.
+
+### What landed
+
+1. `kvcache/recurrent.go`: `Init` now delegates to `InitSplit` (mirroring
+   `Causal.Init` / `Causal.InitSplit`, see
+   `kvcache/causal.go:143-201`). New `InitSplit` forwards K/V dtypes to
+   `c.kv.InitSplit(...)`; new `SetKeyLayerDTypes` forwards the per-layer
+   K dtype map to `c.kv.SetKeyLayerDTypes(...)`. The conv and recurrent
+   state buffers stay f32. Inline rationale comments capture the
+   "ignore K/V split where semantics don't match" rule.
+
+2. `kvcache/recurrent_test.go` (new): six tests covering split init
+   forwarding, conv/recurrent buffers staying f32 under Turbo* requests,
+   per-layer K dtype routing, `SetKeyLayerDTypes(nil)` clearing prior
+   overrides, the `Init` -> `InitSplit` delegation, and `*Recurrent`
+   satisfying the runner's interface assertion.
+
+3. `model/models/qwen3next/cache_test.go` (new), additions to
+   `model/models/lfm2/cache_test.go`, and `model/models/nemotronh/cache_test.go`
+   (new): one promotion-guard test per package that asserts the runner's
+   exact interface check (`cache.(interface{ InitSplit(...) })` and
+   `cache.(interface{ SetKeyLayerDTypes(...) })`) succeeds against a
+   freshly constructed `*HybridCache`. If a future refactor breaks
+   embedding-based promotion, these tests fail at the package boundary
+   rather than letting the runner silently demote the model.
+
+4. `runner/ollamarunner/cache_test.go` (additions): two tests using a
+   fixture that mirrors the embedding pattern (`struct { *kvcache.Recurrent }`).
+   `TestInitKVCacheUsesSplitForHybridCache` proves `kq8-vturbo4` does
+   NOT take the fallback path against a real `*Recurrent` (i.e. the
+   fallback warning is silent for hybrid caches).
+   `TestInitKVCacheAppliesKeyLayerDTypesOnHybridCache` proves the
+   adaptive preset's per-layer K dtype map reaches the cache — its
+   passing test output emits the expected
+   `INFO applied per-layer key cache dtype overrides spec=...` line.
+
+The existing `mockCacheNoSplit`-backed tests
+(`TestInitKVCacheFallsBackOnSplitUnsupported`,
+`TestInitKVCacheDropsLayerOverridesWhenUnsupported`) still cover the
+warn-and-continue path for any future cache type that lacks split init.
+
+### Verification
+
+```text
+GOCACHE=/tmp/ollama-build-gocache go test -count=1 \
+  ./kvcache ./runner/ollamarunner \
+  ./model/models/qwen3next ./model/models/lfm2 ./model/models/nemotronh \
+  ./tools/turboquant/... ./llm ./envconfig ./fs/ggml ./ml/nn
+```
+
+Result: 14 packages PASS, including the 6 new `Recurrent` tests, the
+3 promotion guards, and the 2 runner-level hybrid-cache tests.
+
+```text
+GOCACHE=/tmp/ollama-build-gocache go test -race -count=1 \
+  ./kvcache ./runner/ollamarunner \
+  ./model/models/qwen3next ./model/models/lfm2 ./model/models/nemotronh
+```
+
+Result: PASS under the race detector across all 5 packages.
+
+### Smoke status
+
+Live `qwen3.6:27b-q8_0` smoke at `num_ctx=98304` with
+`OLLAMA_KV_CACHE_TYPE=kq8-vturbo4` is **deferred**. Both GPUs were
+saturated during this session by an unrelated long-running thermal
+stress workload on the same machine (an `ollama serve` instance bound
+to GPU 1 with a 30-minute keep-alive on `qwen3.6:27b-q8_0`). My binary
+booted cleanly but its GPU discovery timed out:
+
+```text
+INFO  failure during GPU discovery
+      OLLAMA_LIBRARY_PATH="[/tmp/lib/ollama /tmp/lib/ollama/cuda_v12]"
+      error="failed to finish discovery before timeout"
+```
+
+`nvidia-smi` itself was hanging during this period — same root cause.
+Falling back to CPU inference would not exercise the CUDA-only Turbo
+flash-attention kernels and would not surface the
+`kv cache device=CUDAn size=...` lines that are the operational signal
+for tier-1 KV savings, so a CPU-only smoke would be unevidence rather
+than weak evidence.
+
+### Smoke command (run when the GPU is free)
+
+This is the same command as the 2026-04-30 verification, against a
+freshly built binary off this branch and with the flat
+`build/lib/ollama/libggml-cuda.so` moved aside per the operator
+runbook (`tools/turboquant/README.md`, "Speed and memory in practice"):
+
+```bash
+# 1) Build (off feature/hybridcache-initsplit, this branch)
+GOCACHE=/tmp/ollama-build-gocache go build -o ~/.local/bin/ollama-tq .
+
+# 2) Move the flat .so aside so only cuda_v12/libggml-cuda.so loads
+test -f build/lib/ollama/libggml-cuda.so && \
+  mv build/lib/ollama/libggml-cuda.so /tmp/ollama-build-libggml-cuda-flat-0501.so
+
+# 3) Start ollama-tq (same env as ~/.local/bin/ollama-serve-tq, but
+#    with kq8-vturbo4 instead of turboquant-adaptive so the result is
+#    not contaminated by an absent qwen3.5 manifest entry).
+OLLAMA_HOST=0.0.0.0:8001 \
+OLLAMA_MODELS=$HOME/.ollama/models \
+OLLAMA_KV_CACHE_TYPE=kq8-vturbo4 \
+OLLAMA_FLASH_ATTENTION=1 \
+OLLAMA_NEW_ENGINE=1 \
+OLLAMA_KEEP_ALIVE=-1 \
+OLLAMA_CONTEXT_LENGTH=98304 \
+OLLAMA_MAX_LOADED_MODELS=1 \
+OLLAMA_NUM_GPU=999 \
+  ~/.local/bin/ollama-tq serve &
+
+# 4) Warm-up + small generation. Same payload as the prior debug log.
+curl -sS http://localhost:8001/api/generate \
+  -d '{"model":"qwen3.6:27b-q8_0","prompt":"What is the capital of France?","options":{"num_ctx":98304,"num_predict":12},"keep_alive":-1}'
+```
+
+### Pass criteria for the smoke
+
+The runner journal must contain:
+
+```text
+kv cache device=CUDA0 size="<size> GiB"
+kv cache device=CUDA1 size="<size> GiB"
+loaded runners count=1
+[GIN] POST "/api/generate" 200 ...
+```
+
+and **must not** contain:
+
+```text
+WARN  cache does not support split key/value dtypes; using key dtype for both
+      requested_key_dtype=3 requested_value_dtype=9 effective_dtype=3
+```
+
+Expected KV total at `num_ctx=98304`: ~2.6 GiB (vs ~6.9 GiB at tier 3
+uniform q8_0 in the 2026-04-30 entry, vs ~13.8 GiB at f16). That puts
+qwen3.6 at ~62% KV savings, matching tier 1 measured on Causal-only
+models (`tools/turboquant/README.md`, "Memory tiers" subsection).
+
+### Stretch (deferred to the Turbo5/6 PR landing on main)
+
+Once the Turbo5/6 kernels are on main and `kturbo6-vturbo4` is a
+runtime preset there, repeat the smoke with
+`OLLAMA_KV_CACHE_TYPE=kturbo6-vturbo4` to confirm hybrid models also
+reach the kturbo6 tier (~76% KV savings at the Phase 0 quality budget).
+No additional code change is required: the same `InitSplit` /
+`SetKeyLayerDTypes` plumbing handles every K/V dtype pair.
+
 ## 2026-04-30 (later) - qwen3.6 launch: three stacked bugs
 
 Goal: get `qwen3.6:27b-q8_0` running through `ollama-tq.service` under
