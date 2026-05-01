@@ -78,7 +78,8 @@ static __global__ void flash_attn_ext_vec(
 
     // Turbo types use the float2 Q path (like f16), not the q8_1 path.
     constexpr bool K_is_unquantized = type_K == GGML_TYPE_F16 ||
-        type_K == GGML_TYPE_TURBO2_0 || type_K == GGML_TYPE_TURBO3_0 || type_K == GGML_TYPE_TURBO4_0;
+        type_K == GGML_TYPE_TURBO2_0 || type_K == GGML_TYPE_TURBO3_0 || type_K == GGML_TYPE_TURBO4_0 ||
+        type_K == GGML_TYPE_TURBO5_0 || type_K == GGML_TYPE_TURBO6_0;
     constexpr bool V_is_unquantized = type_V == GGML_TYPE_F16 ||
         type_V == GGML_TYPE_TURBO2_0 || type_V == GGML_TYPE_TURBO3_0 || type_V == GGML_TYPE_TURBO4_0;
 
@@ -657,3 +658,13 @@ extern DECL_FATTN_VEC_CASE(256, GGML_TYPE_TURBO4_0, GGML_TYPE_TURBO3_0);
 extern DECL_FATTN_VEC_CASE( 64, GGML_TYPE_TURBO4_0, GGML_TYPE_TURBO4_0);
 extern DECL_FATTN_VEC_CASE(128, GGML_TYPE_TURBO4_0, GGML_TYPE_TURBO4_0);
 extern DECL_FATTN_VEC_CASE(256, GGML_TYPE_TURBO4_0, GGML_TYPE_TURBO4_0);
+
+// K=TURBO5, V=TURBO4 (kturbo6-vturbo4 sibling preset, behind preview flag)
+extern DECL_FATTN_VEC_CASE( 64, GGML_TYPE_TURBO5_0, GGML_TYPE_TURBO4_0);
+extern DECL_FATTN_VEC_CASE(128, GGML_TYPE_TURBO5_0, GGML_TYPE_TURBO4_0);
+extern DECL_FATTN_VEC_CASE(256, GGML_TYPE_TURBO5_0, GGML_TYPE_TURBO4_0);
+
+// K=TURBO6, V=TURBO4 (production target for kturbo6-vturbo4 preset)
+extern DECL_FATTN_VEC_CASE( 64, GGML_TYPE_TURBO6_0, GGML_TYPE_TURBO4_0);
+extern DECL_FATTN_VEC_CASE(128, GGML_TYPE_TURBO6_0, GGML_TYPE_TURBO4_0);
+extern DECL_FATTN_VEC_CASE(256, GGML_TYPE_TURBO6_0, GGML_TYPE_TURBO4_0);

@@ -709,6 +709,100 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_turbo4(
     return sum;
 }
 
+// ---- Turbo5 KQ inner product ----
+// Per-element decode via turbo5_dequant_element. Slower than the bulk Turbo4
+// 32-bit-fetch path because 5-bit indices don't byte-align, but correct.
+// Optimisation opportunity: a 16-bit double-byte fetch could decode 1-2
+// elements at a time; defer to a follow-up if the per-element cost dominates.
+template <int D, int nthreads>
+static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_turbo5(
+    const char * __restrict__ K_c, const void * __restrict__ Q_v,
+    const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v) {
+
+    const block_turbo5_0 * K_blk = (const block_turbo5_0 *) K_c;
+    GGML_UNUSED(Q_q8);
+    GGML_UNUSED(Q_ds_v);
+
+    constexpr int cpy_nb = ggml_cuda_get_max_cpy_bytes();
+    constexpr int cpy_ne = cpy_nb / 4;
+
+    float sum = 0.0f;
+    int prev_blk = -1;
+    float norm = 0.0f;
+
+#pragma unroll
+    for (int k0 = 0; k0 < D/2; k0 += nthreads*cpy_ne) {
+        const int base = k0 + (nthreads == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads)*cpy_ne;
+        const int elem0 = base * 2;
+        const int blk   = elem0 / QK_TURBO5;
+
+        if (blk != prev_blk) {
+            norm = __half2float(K_blk[blk].norm);
+            prev_blk = blk;
+        }
+
+#pragma unroll
+        for (int k1 = 0; k1 < cpy_ne; ++k1) {
+            const int j = (elem0 + 2*k1) % QK_TURBO5;
+            const float v0 = turbo5_dequant_element(&K_blk[blk], j,     norm);
+            const float v1 = turbo5_dequant_element(&K_blk[blk], j + 1, norm);
+#ifdef V_DOT2_F32_F16_AVAILABLE
+            const float2 Q_val = __half22float2(((const half2 *) Q_v)[k0/nthreads + k1]);
+#else
+            const float2 Q_val = ((const float2 *) Q_v)[k0/nthreads + k1];
+#endif
+            sum += v0 * Q_val.x + v1 * Q_val.y;
+        }
+    }
+
+    return sum;
+}
+
+// ---- Turbo6 KQ inner product ----
+template <int D, int nthreads>
+static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_turbo6(
+    const char * __restrict__ K_c, const void * __restrict__ Q_v,
+    const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v) {
+
+    const block_turbo6_0 * K_blk = (const block_turbo6_0 *) K_c;
+    GGML_UNUSED(Q_q8);
+    GGML_UNUSED(Q_ds_v);
+
+    constexpr int cpy_nb = ggml_cuda_get_max_cpy_bytes();
+    constexpr int cpy_ne = cpy_nb / 4;
+
+    float sum = 0.0f;
+    int prev_blk = -1;
+    float norm = 0.0f;
+
+#pragma unroll
+    for (int k0 = 0; k0 < D/2; k0 += nthreads*cpy_ne) {
+        const int base = k0 + (nthreads == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads)*cpy_ne;
+        const int elem0 = base * 2;
+        const int blk   = elem0 / QK_TURBO6;
+
+        if (blk != prev_blk) {
+            norm = __half2float(K_blk[blk].norm);
+            prev_blk = blk;
+        }
+
+#pragma unroll
+        for (int k1 = 0; k1 < cpy_ne; ++k1) {
+            const int j = (elem0 + 2*k1) % QK_TURBO6;
+            const float v0 = turbo6_dequant_element(&K_blk[blk], j,     norm);
+            const float v1 = turbo6_dequant_element(&K_blk[blk], j + 1, norm);
+#ifdef V_DOT2_F32_F16_AVAILABLE
+            const float2 Q_val = __half22float2(((const half2 *) Q_v)[k0/nthreads + k1]);
+#else
+            const float2 Q_val = ((const float2 *) Q_v)[k0/nthreads + k1];
+#endif
+            sum += v0 * Q_val.x + v1 * Q_val.y;
+        }
+    }
+
+    return sum;
+}
+
 template <ggml_type type_K, int D, int nthreads>
 constexpr __device__ vec_dot_KQ_t get_vec_dot_KQ() {
     if constexpr (type_K == GGML_TYPE_F16) {
@@ -729,6 +823,10 @@ constexpr __device__ vec_dot_KQ_t get_vec_dot_KQ() {
         return vec_dot_fattn_vec_KQ_turbo3<D, nthreads>;
     } else if constexpr (type_K == GGML_TYPE_TURBO4_0) {
         return vec_dot_fattn_vec_KQ_turbo4<D, nthreads>;
+    } else if constexpr (type_K == GGML_TYPE_TURBO5_0) {
+        return vec_dot_fattn_vec_KQ_turbo5<D, nthreads>;
+    } else if constexpr (type_K == GGML_TYPE_TURBO6_0) {
+        return vec_dot_fattn_vec_KQ_turbo6<D, nthreads>;
     } else {
         static_assert(type_K == -1, "bad type");
         return nullptr;
