@@ -387,6 +387,67 @@ context. Treat `kq8-vturbo4` as the latency-preferred preset for users
 running 32k+ contexts; revisit the adaptive code path if context-aware
 calibration is later needed.
 
+### Speed and memory in practice
+
+The headline win is **enabling models or context lengths that did not
+fit at f16 on the same hardware**. When the model already fits at f16,
+the speed delta from the validated KV-cache presets is small; when it
+does not, the difference is order-of-magnitude.
+
+**Three memory-savings tiers operators will actually see:**
+
+| Tier | Path | bytes / K-elem | bytes / V-elem | total / pair | savings vs f16 |
+|---|---|---:|---:|---:|---:|
+| 1 | `kq8-vturbo4` (model-agnostic, full split support) | 1.000 | 0.531 | **1.531** | **61.7%** |
+| 2 | `turboquant-adaptive` with manifest match (e.g. qwen2.5:7b Q4_K_M) | 0.598 | 0.531 | **1.129** | **71.8%** |
+| 3 | `turboquant-adaptive` on a hybrid attention+SSM model (e.g. qwen3.5/3.6) | 1.000 | 1.000 | **2.000** | **50%** |
+
+Tier 3 is the fallback path: hybrid caches (qwen3.5/3.6's
+`*HybridCache`) do not implement split key/value dtypes today, so
+`runner/ollamarunner/cache.initKVCache` falls back to uniform q8_0 for
+both K and V (see `fix(turboquant): handle hybrid caches and avoid slog
+source collision`). The runtime logs `cache does not support split
+key/value dtypes; using key dtype for both` at WARN level so operators
+know they are on the conservative tier. Lifting hybrid models into
+tier 1/2 requires `InitSplit` in `*HybridCache` (and ideally per-layer
+overrides for attention layers, since SSM "K/V" don't behave like
+attention K/V); that is a separate piece of work.
+
+**Measured throughput on `qwen3.6:27b-q8_0`** (architecture=qwen35,
+head_dim=256, 65 layers, dual-GPU box: 4090 24 GB + 5090 32 GB,
+`OLLAMA_FLASH_ATTENTION=1`, `OLLAMA_NEW_ENGINE=1`, num_ctx=4096,
+prompt of ~1024 tokens, 128 decoded tokens, on 2026-04-30):
+
+| KV cache | KV on GPU | KV on CPU spill | Prefill (1k prompt) | Decode |
+|---|---:|---:|---:|---:|
+| `turboquant-adaptive` → uniform q8_0 (tier 3) | 6.9 GiB | 0 | **1961 tok/s** | **35.8 tok/s** |
+| f16 | 1.7 GiB | 2.3 GiB | 210 tok/s | 2.0 tok/s |
+
+The f16 row is **not** an apples-to-apples kernel comparison: with
+this hardware budget, f16 KV does not fit fully on GPU and the runner
+spills part of the cache to CPU, which dominates decode time. That is
+exactly the operationally important regime — the q8_0 tier turns "this
+model is barely usable at 2 tok/s" into "this model decodes at 36 tok/s
+and answers normally." Order-of-magnitude effects in this column are
+about *fitting*, not about kernel speed.
+
+When the model fits at f16 anyway (e.g. `qwen2.5:7b` on a single
+4090), expect kq8-vturbo4 / q8_0 KV decode to be roughly equal or
+slightly faster than f16 (less KV memory bandwidth per token, plus a
+tuned q8_0 K kernel in flash attention) — typically 0–20% decode
+speedup, similar prefill, with substantially more context headroom on
+the same card.
+
+**Operational gotcha (CUDA `.so` discovery):** the build directory at
+`build/lib/ollama/` can end up with both a flat `libggml-cuda.so` and
+the `cuda_v12/libggml-cuda.so` simultaneously. The eval-path
+(in-process Go) needs the flat one; the `ollama serve` runner
+subprocess does its own backend discovery and loads BOTH if both are
+present, which segfaults inside `ggml_backend_tensor_set` during
+weight upload (see `TURBOQUANT-DEBUG-LOG.md` 2026-04-30 entry on
+qwen3.6 launch). For server use, keep only `cuda_v12/libggml-cuda.so`;
+restore the flat only when running the in-process Phase 0 eval.
+
 Limits surfaced by this run:
 
 - 128k coverage is one held-out sequence (131k tokens scored). That is

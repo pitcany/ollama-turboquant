@@ -3,6 +3,174 @@
 Purpose: rigorous, evidence-first log per `TURBOQUANT-CLAUDE-HANDOFF.md`.
 No speculative patches. Each fix must cite the first proven mismatch it explains.
 
+## 2026-04-30 (later) - qwen3.6 launch: three stacked bugs
+
+Goal: get `qwen3.6:27b-q8_0` running through `ollama-tq.service` under
+`OLLAMA_KV_CACHE_TYPE=turboquant-adaptive`. The previous launcher used
+`turbo4` (the all-Turbo4 K/V config Phase 0 rejected); after switching
+to `turboquant-adaptive` and rebuilding, the warm-up failed with three
+distinct symptoms in sequence.
+
+### Bug 1: slog key collision panic at model load
+
+Symptom: runner subprocess panics during `slog.Info` from
+`logutil/logutil.go:26`:
+
+```
+panic: interface conversion: interface {} is string, not *slog.Source
+```
+
+Root cause: the new `turboquant-adaptive resolved` and
+`applied turboquant-adaptive calibration` log lines used the key
+`"source"` for the manifest source name. The global text handler's
+`ReplaceAttr` casts `attr.Value.Any()` as `*slog.Source` for the
+SourceKey case, so a string under the same key panics. First proven
+mismatch: stack trace in journal points at `slog.Info` →
+`logutil.func2.SourceKey` → string-to-*slog.Source assertion.
+
+Fix: rename both keys to `"manifest_source"` in `llm/server.go:275`
+and `llm/server.go:461`. Committed in
+`048f4832 fix(turboquant): handle hybrid caches and avoid slog source collision`.
+
+### Bug 2: hybrid cache rejects split init
+
+Symptom: after the panic was fixed, model load returned
+
+```
+llm load error: failed to initialize model: cache does not support split key/value dtypes: key=3 value=9
+```
+
+(`key=3` is `DTypeQ80`, `value=9` is `DTypeTurbo4`.)
+
+Root cause: qwen3.5/3.6 uses `model/models/qwen3next.HybridCache`
+(attention+SSM), which does not implement
+`InitSplit(ml.Backend, ml.DType, ml.DType, int, int, int)`.
+`runner/ollamarunner/cache.initKVCache` returned a hard error in that
+case. `kq8-vturbo4` (and the `turboquant-adaptive` fallback to it)
+both need split init, so every hybrid model failed even though the
+right thing is to fall back to a uniform K/V dtype.
+
+Fix: when `InitSplit` is missing, log a WARN and call
+`cache.Init(backend, keyDType, ...)` with the higher-precision (key)
+dtype for both K and V. Same warn-and-continue treatment for
+`SetKeyLayerDTypes`. Two new tests in `cache_test.go`:
+`TestInitKVCacheFallsBackOnSplitUnsupported` and
+`TestInitKVCacheDropsLayerOverridesWhenUnsupported`. Same commit as
+above.
+
+### Bug 3: double-loaded CUDA backend SIGSEGV
+
+Symptom: after fixes 1 and 2 deployed, model load now reaches weight
+upload but runner subprocess crashes with
+
+```
+SIGSEGV: segmentation violation
+signal arrived during cgo execution
+```
+
+inside `_Cfunc_ggml_backend_tensor_set` at `ggml.go:617` during
+`Backend.Load.func3.3`. Reproduced on `llama3.3` too — not specific to
+qwen3.5/3.6 or any cache type. RIP in libcuda/libggml-cuda.
+
+Root cause: both
+`build/lib/ollama/libggml-cuda.so` (488 MB, Apr 29 22:07) and
+`build/lib/ollama/cuda_v12/libggml-cuda.so` (472 MB, Apr 29 16:13)
+were present. The runner subprocess discovery loaded both:
+
+```
+load_backend: loaded CUDA backend from .../libggml-cuda.so
+load_backend: loaded CUDA backend from .../cuda_v12/libggml-cuda.so
+```
+
+This is the "double-load crash" `TURBOQUANT-CLAUDE-HANDOFF.md` already
+warns about. The flat `.so` had been restored by the prior session for
+in-process eval (the eval path needs the flat) but never moved aside
+again before server use.
+
+Fix: `mv build/lib/ollama/libggml-cuda.so /tmp/ollama-build-libggml-cuda-flat-0430b.so`.
+Subsequent runner subprocesses load only `cuda_v12/libggml-cuda.so`
+and the SIGSEGV disappears. No code change.
+
+### Verification
+
+Live test against `ollama-tq.service` on :8001 after all three fixes:
+
+```bash
+curl -sS http://localhost:8001/api/generate \
+  -d '{"model":"qwen3.6:27b-q8_0","prompt":"What is the capital of France?","options":{"num_ctx":98304,"num_predict":12},"keep_alive":-1}'
+# 200 OK, decoded tokens, 11.6 s wall (cold load + 12 tok decode)
+```
+
+Journal sequence on success:
+
+```
+turboquant-adaptive resolved cache_type=kq8-vturbo4 manifest_source=fallback
+turboquant-adaptive could not load per-layer overrides; using base preset only
+  error="no manifest entry for arch=qwen35 file_type=Q8_0 head_dim=256"
+cache does not support split key/value dtypes; using key dtype for both
+  requested_key_dtype=3 requested_value_dtype=9 effective_dtype=3
+kv cache device=CUDA0 size="2.8 GiB"
+kv cache device=CUDA1 size="4.1 GiB"
+loaded runners count=1
+[GIN] POST "/api/generate" 200 11.602398244s
+```
+
+KV total 6.9 GiB at num_ctx=98304 vs ~13.8 GiB at f16 → 50% saved
+(uniform q8_0 tier). Hybrid models cannot reach tier-1 (kq8-vturbo4,
+61.7%) or tier-2 (adaptive, 71.8%) until `*HybridCache` implements
+`InitSplit`.
+
+### Throughput, fair vs unfair
+
+Decode bench on the same hardware after fixes
+(num_ctx=4096, prompt~1024 tokens, 128 decoded tokens, seed=1):
+
+| KV cache | KV on GPU | KV on CPU spill | Prefill (1k) | Decode |
+|---|---:|---:|---:|---:|
+| `turboquant-adaptive` → uniform q8_0 | 6.9 GiB | 0 | 1961 tok/s | 35.8 tok/s |
+| f16 (sibling on :8005, dirty f16 baseline) | 1.7 GiB | 2.3 GiB | 210 tok/s | 2.0 tok/s |
+
+The f16 row is **not** an apples-to-apples kernel comparison: with the
+available GPU budget, f16 KV does not fit fully and partially spills
+to CPU, which dominates decode. The operationally relevant claim is
+"the q8_0 tier turns this model from barely usable into normal-speed,"
+not "q8_0 is 18x faster than f16 in the kernel." Documented in
+`tools/turboquant/README.md` "Speed and memory in practice"
+subsection.
+
+### Files changed
+
+- `llm/server.go`: rename `"source"` → `"manifest_source"` in two
+  log lines.
+- `runner/ollamarunner/cache.go`: graceful fallback when split init or
+  per-layer overrides are not supported; inline rationale.
+- `runner/ollamarunner/cache_test.go`: two regression tests covering
+  the new fallback paths.
+- `tools/turboquant/README.md`: new "Speed and memory in practice"
+  subsection — three savings tiers, measured tok/s, the
+  fits/doesn't-fit framing, and the double-`.so` operational gotcha.
+
+Outside this repo (in `~/AI/local-llm-stack` and
+`~/.local/bin/ollama-serve-tq`), the launcher was switched from
+`OLLAMA_KV_CACHE_TYPE=turbo4` to `turboquant-adaptive` and the
+qwen3.6 preset was bumped to `qwen3.6:27b-q8_0`. See commits
+`c9b855b` and `ef8967b` on the `pitcany/AI` repo.
+
+### Open items for next session
+
+- `*HybridCache` (`model/models/qwen3next/cache.go` or wherever the
+  type lives) needs `InitSplit` and `SetKeyLayerDTypes` if hybrid
+  models should reach tier-1/2 KV savings. Right now they are pinned
+  to tier 3 (50%).
+- The bundled manifest only has `qwen2.5-7b-q4km-adaptive`. To add
+  qwen3.5/qwen3.6 entries, run `cmd/turboquant-calibrate` on a
+  representative snapshot for those models and bundle the artifact
+  per the operator guide.
+- Make the `build/lib/ollama/libggml-cuda.so` vs
+  `cuda_v12/libggml-cuda.so` discipline explicit in the build
+  Makefile or a guard in `ml/backend/ggml/ggml/src/ggml.go`'s
+  `OnceLoad` so future contributors do not re-trip the double-load.
+
 ## 2026-04-30 - Long-context Phase 0 validation (8k, 32k, 128k)
 
 Goal: confirm that the two promoted runtime presets (`kq8-vturbo4` and the
