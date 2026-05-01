@@ -20,9 +20,13 @@
 extern "C" void quantize_row_turbo2_0_ref(const float * x, block_turbo2_0 * y, int64_t k);
 extern "C" void quantize_row_turbo3_0_ref(const float * x, block_turbo3_0 * y, int64_t k);
 extern "C" void quantize_row_turbo4_0_ref(const float * x, block_turbo4_0 * y, int64_t k);
+extern "C" void quantize_row_turbo5_0_ref(const float * x, block_turbo5_0 * y, int64_t k);
+extern "C" void quantize_row_turbo6_0_ref(const float * x, block_turbo6_0 * y, int64_t k);
 extern "C" void dequantize_row_turbo2_0(const block_turbo2_0 * x, float * y, int64_t k);
 extern "C" void dequantize_row_turbo3_0(const block_turbo3_0 * x, float * y, int64_t k);
 extern "C" void dequantize_row_turbo4_0(const block_turbo4_0 * x, float * y, int64_t k);
+extern "C" void dequantize_row_turbo5_0(const block_turbo5_0 * x, float * y, int64_t k);
+extern "C" void dequantize_row_turbo6_0(const block_turbo6_0 * x, float * y, int64_t k);
 extern "C" void turbo_cpu_fwht(float * x, int group_size);
 
 namespace {
@@ -35,6 +39,7 @@ struct Options {
     uint64_t seed = 0x54425552424f5155ULL;
     std::string input_f32;
     bool header = true;
+    bool assert_bounds = false;
 };
 
 struct Metrics {
@@ -75,9 +80,15 @@ struct Rng {
 
 void usage(const char * argv0) {
     std::fprintf(stderr,
-        "usage: %s [--rows N] [--queries N] [--seed N] [--input-f32 path] [--no-header]\n"
+        "usage: %s [--rows N] [--queries N] [--seed N] [--input-f32 path] [--no-header] [--assert-bounds]\n"
         "\n"
-        "Input, when provided, must be raw little-endian f32 rows of width 128.\n",
+        "Input, when provided, must be raw little-endian f32 rows of width 128.\n"
+        "\n"
+        "--assert-bounds: after printing the CSV, check per-variant mse against the\n"
+        "  high-rate PCM bound for N(0, 1/128): bound(bits) = (sqrt(3)*pi/2)*sigma^2*4^-bits\n"
+        "  with sigma^2 = 1/128. Asserts mse <= 1.5 * bound for turbo2/turbo3/turbo5/turbo6.\n"
+        "  turbo4 is intentionally skipped because the in-tree 4-bit centroid table is\n"
+        "  empirically calibrated, not Lloyd-Max for N(0, 1/128). Returns 1 on any failure.\n",
         argv0);
 }
 
@@ -110,6 +121,8 @@ bool parse_args(int argc, char ** argv, Options * opts) {
             opts->input_f32 = argv[++i];
         } else if (arg == "--no-header") {
             opts->header = false;
+        } else if (arg == "--assert-bounds") {
+            opts->assert_bounds = true;
         } else {
             return false;
         }
@@ -247,6 +260,44 @@ void print_metric(const char * variant, const Metrics & m) {
         m.dot_max_abs);
 }
 
+struct BoundCheck {
+    const char * variant;
+    double mse;
+    int bits;
+};
+
+// High-rate PCM bound for a scalar quantiser on N(0, sigma^2):
+//   bound(bits) = (sqrt(3) * pi / 2) * sigma^2 * 4^{-bits}
+// For the WHT-rotated per-block representation, sigma^2 = 1/128.
+double pcm_bound(int bits) {
+    const double sigma2 = 1.0 / 128.0;
+    const double prefactor = std::sqrt(3.0) * M_PI / 2.0;
+    return prefactor * sigma2 * std::pow(4.0, -bits);
+}
+
+bool check_bounds(const std::vector<BoundCheck> & checks) {
+    const double tolerance = 1.5;
+    bool ok = true;
+    for (const BoundCheck & c : checks) {
+        if (std::strcmp(c.variant, "turbo4") == 0) {
+            std::fprintf(stderr,
+                "note: skipping bound check for turbo4 (in-tree 4-bit centroid table is "
+                "empirically calibrated, not Lloyd-Max for N(0, 1/128); see "
+                "tools/turboquant/centroids/README.md)\n");
+            continue;
+        }
+        const double bound = pcm_bound(c.bits);
+        const double ratio = c.mse / bound;
+        if (c.mse > tolerance * bound) {
+            std::fprintf(stderr,
+                "FAIL variant=%s mse=%.10g bound=%.10g ratio=%.6f\n",
+                c.variant, c.mse, bound, ratio);
+            ok = false;
+        }
+    }
+    return ok;
+}
+
 } // namespace
 
 int main(int argc, char ** argv) {
@@ -267,15 +318,39 @@ int main(int argc, char ** argv) {
         std::puts("variant,d,rows,queries,mse,max_abs,mean_cosine,mean_angle_deg,dot_mse,dot_mae,dot_max_abs");
     }
 
-    print_metric("turbo2", run_variant<block_turbo2_0>(
+    const Metrics m_turbo2 = run_variant<block_turbo2_0>(
         "turbo2", input, rotated_input, rotated_queries, opts,
-        quantize_row_turbo2_0_ref, dequantize_row_turbo2_0));
-    print_metric("turbo3", run_variant<block_turbo3_0>(
+        quantize_row_turbo2_0_ref, dequantize_row_turbo2_0);
+    print_metric("turbo2", m_turbo2);
+    const Metrics m_turbo3 = run_variant<block_turbo3_0>(
         "turbo3", input, rotated_input, rotated_queries, opts,
-        quantize_row_turbo3_0_ref, dequantize_row_turbo3_0));
-    print_metric("turbo4", run_variant<block_turbo4_0>(
+        quantize_row_turbo3_0_ref, dequantize_row_turbo3_0);
+    print_metric("turbo3", m_turbo3);
+    const Metrics m_turbo4 = run_variant<block_turbo4_0>(
         "turbo4", input, rotated_input, rotated_queries, opts,
-        quantize_row_turbo4_0_ref, dequantize_row_turbo4_0));
+        quantize_row_turbo4_0_ref, dequantize_row_turbo4_0);
+    print_metric("turbo4", m_turbo4);
+    const Metrics m_turbo5 = run_variant<block_turbo5_0>(
+        "turbo5", input, rotated_input, rotated_queries, opts,
+        quantize_row_turbo5_0_ref, dequantize_row_turbo5_0);
+    print_metric("turbo5", m_turbo5);
+    const Metrics m_turbo6 = run_variant<block_turbo6_0>(
+        "turbo6", input, rotated_input, rotated_queries, opts,
+        quantize_row_turbo6_0_ref, dequantize_row_turbo6_0);
+    print_metric("turbo6", m_turbo6);
+
+    if (opts.assert_bounds) {
+        const std::vector<BoundCheck> checks = {
+            {"turbo2", m_turbo2.mse, 2},
+            {"turbo3", m_turbo3.mse, 3},
+            {"turbo4", m_turbo4.mse, 4},
+            {"turbo5", m_turbo5.mse, 5},
+            {"turbo6", m_turbo6.mse, 6},
+        };
+        if (!check_bounds(checks)) {
+            return 1;
+        }
+    }
 
     return 0;
 }
