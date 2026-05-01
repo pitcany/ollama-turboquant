@@ -37,7 +37,7 @@ The script runs `n_restarts = 8` restarts per bit width with mixed
 initialisations:
 
 * even restarts: equiprobable-quantile init (the historical seeding);
-* odd restarts: k-means++ on a downsampled subset (capped at 200k points to
+* odd restarts: k-means++ on a downsampled subset (capped at 50k points to
   bound memory of the `(N, k)` distance broadcast).
 
 The lowest-MSE result is kept. Lower bit widths (<=4) use a single restart;
@@ -79,8 +79,11 @@ emitted bit width so a regression to `>1.10` surfaces immediately.
 The in-tree `CENTROIDS_4BIT` table in `ggml-turbo-quant.c` does **not**
 match Lloyd-Max for `N(0, 1/128)`: the regenerated outermost centroid lands
 at +/-0.242 vs. the in-tree +/-0.174 (a ~5% structural difference, far
-beyond sampling noise). The 2-bit and 3-bit tables agree to within
-sampling noise (<=~1e-3).
+beyond sampling noise). The 2-bit table agrees to within sampling noise
+(<1e-3). The 3-bit table sits on the boundary at ~1.2e-3 and trips the
+structural-discrepancy NOTE marginally, but is qualitatively a Lloyd-Max
+fixed point. Only the 4-bit table shows the structural ~5% difference
+described below.
 
 The most likely explanation is that the original 4-bit table was
 **calibrated empirically** against measured post-WHT activations rather

@@ -103,7 +103,7 @@ def lloyd_max_restart(
 
     Even restarts use deterministic equiprobable-quantile init (the historical
     seeding); odd restarts use k-means++ on a downsampled subset (capped at
-    200k points for memory) to inject diversity. Returns the centroid set
+    50k points for memory) to inject diversity. Returns the centroid set
     with lowest empirical MSE on `samples`.
     """
     rng = np.random.default_rng(seed)
