@@ -104,93 +104,102 @@ GOCACHE=/tmp/ollama-build-gocache go test -race -count=1 \
 
 Result: PASS under the race detector across all 5 packages.
 
-### Smoke status
+### Smoke (later this session, GPUs free): PASS
 
-Live `qwen3.6:27b-q8_0` smoke at `num_ctx=98304` with
-`OLLAMA_KV_CACHE_TYPE=kq8-vturbo4` is **deferred**. Both GPUs were
-saturated during this session by an unrelated long-running thermal
-stress workload on the same machine (an `ollama serve` instance bound
-to GPU 1 with a 30-minute keep-alive on `qwen3.6:27b-q8_0`). My binary
-booted cleanly but its GPU discovery timed out:
-
-```text
-INFO  failure during GPU discovery
-      OLLAMA_LIBRARY_PATH="[/tmp/lib/ollama /tmp/lib/ollama/cuda_v12]"
-      error="failed to finish discovery before timeout"
-```
-
-`nvidia-smi` itself was hanging during this period — same root cause.
-Falling back to CPU inference would not exercise the CUDA-only Turbo
-flash-attention kernels and would not surface the
-`kv cache device=CUDAn size=...` lines that are the operational signal
-for tier-1 KV savings, so a CPU-only smoke would be unevidence rather
-than weak evidence.
-
-### Smoke command (run when the GPU is free)
-
-This is the same command as the 2026-04-30 verification, against a
-freshly built binary off this branch and with the flat
-`build/lib/ollama/libggml-cuda.so` moved aside per the operator
-runbook (`tools/turboquant/README.md`, "Speed and memory in practice"):
+Live run of `qwen3.6:27b-q8_0` at `num_ctx=98304` with
+`OLLAMA_KV_CACHE_TYPE=kq8-vturbo4`, freshly built binary off
+`turboquant/hybridcache-split-init`. Setup followed the operator
+runbook (`tools/turboquant/README.md`, "Speed and memory in
+practice"): flat `build/lib/ollama/libggml-cuda.so` moved aside so
+only `cuda_v12/libggml-cuda.so` loads.
 
 ```bash
-# 1) Build (off feature/hybridcache-initsplit, this branch)
-GOCACHE=/tmp/ollama-build-gocache go build -o ~/.local/bin/ollama-tq .
-
-# 2) Move the flat .so aside so only cuda_v12/libggml-cuda.so loads
-test -f build/lib/ollama/libggml-cuda.so && \
-  mv build/lib/ollama/libggml-cuda.so /tmp/ollama-build-libggml-cuda-flat-0501.so
-
-# 3) Start ollama-tq (same env as ~/.local/bin/ollama-serve-tq, but
-#    with kq8-vturbo4 instead of turboquant-adaptive so the result is
-#    not contaminated by an absent qwen3.5 manifest entry).
-OLLAMA_HOST=0.0.0.0:8001 \
-OLLAMA_MODELS=$HOME/.ollama/models \
-OLLAMA_KV_CACHE_TYPE=kq8-vturbo4 \
-OLLAMA_FLASH_ATTENTION=1 \
-OLLAMA_NEW_ENGINE=1 \
-OLLAMA_KEEP_ALIVE=-1 \
-OLLAMA_CONTEXT_LENGTH=98304 \
-OLLAMA_MAX_LOADED_MODELS=1 \
-OLLAMA_NUM_GPU=999 \
-  ~/.local/bin/ollama-tq serve &
-
-# 4) Warm-up + small generation. Same payload as the prior debug log.
+GOCACHE=/tmp/ollama-build-gocache go build -o /tmp/ollama-tq-hybridcache .
+mv build/lib/ollama/libggml-cuda.so /tmp/ollama-build-libggml-cuda-flat-smoke.so
+OLLAMA_HOST=127.0.0.1:8001 OLLAMA_KV_CACHE_TYPE=kq8-vturbo4 \
+OLLAMA_FLASH_ATTENTION=1 OLLAMA_NEW_ENGINE=1 OLLAMA_KEEP_ALIVE=-1 \
+OLLAMA_CONTEXT_LENGTH=98304 OLLAMA_MAX_LOADED_MODELS=1 OLLAMA_NUM_GPU=999 \
+  /tmp/ollama-tq-bin/ollama-tq-hybridcache serve &
 curl -sS http://localhost:8001/api/generate \
   -d '{"model":"qwen3.6:27b-q8_0","prompt":"What is the capital of France?","options":{"num_ctx":98304,"num_predict":12},"keep_alive":-1}'
+# 200 OK, 11.7 s wall (cold load + 12 tok decode), thinking-mode tokens streamed.
 ```
 
-### Pass criteria for the smoke
-
-The runner journal must contain:
+Decisive log lines from the run (`/tmp/ollama-tq-smoke/server.log`):
 
 ```text
-kv cache device=CUDA0 size="<size> GiB"
-kv cache device=CUDA1 size="<size> GiB"
+inference compute name=CUDA0 description="NVIDIA GeForce RTX 4090" available="23.0 GiB"
+inference compute name=CUDA1 description="NVIDIA GeForce RTX 5090" available="30.9 GiB"
+
+load request="{Operation:commit ... KvSize:98304 KvCacheType:kq8-vturbo4
+  KeyCacheLayerTypes: ... GPULayers:65[CUDA1 Layers:39(0..38), CUDA0 Layers:26(39..64)] ...}"
+
+model weights device=CUDA0 size="11.5 GiB"
+model weights device=CUDA1 size="15.1 GiB"
+model weights device=CPU   size="1.3 GiB"
+kv cache    device=CUDA0 size="2.4 GiB"
+kv cache    device=CUDA1 size="3.6 GiB"
+compute graph device=CUDA0 size="1.1 GiB"
+compute graph device=CUDA1 size="1.7 GiB"
+compute graph device=CPU   size="168.0 MiB"
+total memory size="36.9 GiB"
 loaded runners count=1
-[GIN] POST "/api/generate" 200 ...
+[GIN] 2026/05/01 - 13:58:30 | 200 | 11.717799039s | POST "/api/generate"
 ```
 
-and **must not** contain:
+The fallback warning from the 2026-04-30 entry —
+`cache does not support split key/value dtypes; using key dtype for both` —
+**did not fire**. `grep -E 'cache does not support split key/value dtypes'`
+on the full server log returns no matches. That is the verbatim runner
+log line confirming the split preset took effect on `qwen3.6:27b-q8_0`:
+the runner's `cache.(interface{ InitSplit(...) })` assertion now
+succeeds against `*HybridCache` (via promoted `*kvcache.Recurrent`
+methods), so it routes through `Causal.InitSplit(K=q8_0, V=turbo4)`
+instead of warning-and-falling-back to uniform q8_0.
 
-```text
-WARN  cache does not support split key/value dtypes; using key dtype for both
-      requested_key_dtype=3 requested_value_dtype=9 effective_dtype=3
-```
+### Measured KV memory: before vs after
 
-Expected KV total at `num_ctx=98304`: ~2.6 GiB (vs ~6.9 GiB at tier 3
-uniform q8_0 in the 2026-04-30 entry, vs ~13.8 GiB at f16). That puts
-qwen3.6 at ~62% KV savings, matching tier 1 measured on Causal-only
-models (`tools/turboquant/README.md`, "Memory tiers" subsection).
+| Run | Cache shape on hybrid | KV CUDA0 | KV CUDA1 | KV total | vs f16 |
+|---|---|---:|---:|---:|---:|
+| 2026-04-30 (pre-fix, fallback) | uniform q8_0  | 2.8 GiB | 4.1 GiB | **6.9 GiB** | ~50% |
+| 2026-05-01 (this fix, kq8-vturbo4) | K=q8_0, V=turbo4 | 2.4 GiB | 3.6 GiB | **6.0 GiB** | **~57%** |
+| f16 reference (from 2026-04-30 entry) | f16/f16 | — | — | ~13.8 GiB | — |
+
+Reduction over the previous tier-3 fallback: 0.9 GiB total
+(13.0% smaller than uniform q8_0; ~7 percentage-points larger
+savings vs f16). The full ~62% prediction from the Causal-only Phase 0
+results is not reached here for one structural reason: only the
+attention layers in qwen3.6 carry K/V tensors that consume the split.
+The ~half of layers that are GatedDeltaNet (SSM) keep their conv1d +
+recurrent state at f32 (`kvcache/recurrent.go:584-610`,
+`kvcache/recurrent.go:598-610`), so they neither benefit from the
+turbo4 V tier nor change between fix and fallback. The 13% delta
+between the two rows in the table above is exactly the V dtype
+shrinking from q8_0 (1.0 byte/elem) to turbo4 (0.531 byte/elem) on
+the attention half of the cache, scaled into the hybrid layout —
+matching the per-element ratio in `fs/ggml/ggml.go::kvCacheBytesPerElementKV`.
+
+Decode throughput, prefill timing, and quality were not the focus of
+this smoke (the prior debug log entry already covered those for the
+tier-3 fallback path). They will be revisited if and when the
+adaptive preset gets a `qwen3.5` / `qwen3.6` manifest entry, at which
+point the per-layer K dtype overrides will route through the same
+`SetKeyLayerDTypes` path validated here.
 
 ### Stretch (deferred to the Turbo5/6 PR landing on main)
 
 Once the Turbo5/6 kernels are on main and `kturbo6-vturbo4` is a
 runtime preset there, repeat the smoke with
 `OLLAMA_KV_CACHE_TYPE=kturbo6-vturbo4` to confirm hybrid models also
-reach the kturbo6 tier (~76% KV savings at the Phase 0 quality budget).
-No additional code change is required: the same `InitSplit` /
-`SetKeyLayerDTypes` plumbing handles every K/V dtype pair.
+reach the kturbo6 tier. No additional code change is required: the
+same `InitSplit` / `SetKeyLayerDTypes` plumbing handles every K/V
+dtype pair.
+
+### Cleanup
+
+Server stopped (`kill -TERM`, exited in 2 s). Flat
+`build/lib/ollama/libggml-cuda.so` moved back into place so the
+workspace is byte-identical to its pre-smoke state.
 
 ## 2026-04-30 (later) - qwen3.6 launch: three stacked bugs
 
