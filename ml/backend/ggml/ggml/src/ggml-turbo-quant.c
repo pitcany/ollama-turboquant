@@ -847,6 +847,117 @@ size_t quantize_turbo5_0(const float * GGML_RESTRICT src, void * GGML_RESTRICT d
     return nrows * row_size;
 }
 
+/* ---------- TURBO6_0: 6-bit PolarQuant with WHT rotation ---------- */
+
+void quantize_row_turbo6_0_ref(const float * GGML_RESTRICT x, block_turbo6_0 * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TURBO6 == 0);
+    const int nb = k / QK_TURBO6;
+    const int d  = QK_TURBO6;
+
+    for (int block = 0; block < nb; block++) {
+        const float * src = x + block * d;
+
+        /* 1. Extract norm */
+        float norm_sq = 0.0f;
+        for (int i = 0; i < d; i++) norm_sq += src[i] * src[i];
+        float norm = sqrtf(norm_sq);
+
+        /* 2. Normalize */
+        float normalized[TURBO_D];
+        if (norm > 1e-10f) {
+            const float inv = 1.0f / norm;
+            for (int i = 0; i < d; i++) normalized[i] = src[i] * inv;
+        } else {
+            memset(normalized, 0, d * sizeof(float));
+        }
+
+        /* 3. Forward WHT rotation (matches CUDA set_rows). */
+        float rotated[TURBO_D];
+        memcpy(rotated, normalized, d * sizeof(float));
+        turbo_cpu_fwht(rotated, d);
+
+        /* 4. 6-bit quantization (64 centroids). */
+        uint8_t indices[TURBO_D];
+        for (int i = 0; i < d; i++) {
+            indices[i] = (uint8_t)nearest_centroid_6bit(rotated[i]);
+        }
+
+        /* 5. Norm correction. */
+        float recon_norm_sq = 0.0f;
+        for (int i = 0; i < d; i++) {
+            recon_norm_sq += CENTROIDS_6BIT[indices[i]] * CENTROIDS_6BIT[indices[i]];
+        }
+        float recon_norm = sqrtf(recon_norm_sq);
+        float corrected_norm = (recon_norm > 1e-10f) ? norm / recon_norm : norm;
+        y[block].norm  = GGML_FP32_TO_FP16(corrected_norm);
+        y[block].rnorm = GGML_FP32_TO_FP16(0.0f);
+
+        /* 6. Pack 128 6-bit indices into qs[96] via a 32-bit accumulator. */
+        memset(y[block].qs, 0, QK_TURBO6 * 6 / 8);
+        uint32_t acc = 0;
+        int bits = 0;
+        int qpos = 0;
+        for (int i = 0; i < d; i++) {
+            acc |= ((uint32_t)(indices[i] & 0x3F)) << bits;
+            bits += 6;
+            while (bits >= 8) {
+                y[block].qs[qpos++] = (uint8_t)(acc & 0xFF);
+                acc >>= 8;
+                bits -= 8;
+            }
+        }
+        if (bits > 0) {
+            y[block].qs[qpos++] = (uint8_t)(acc & 0xFF);
+        }
+        assert(qpos == QK_TURBO6 * 6 / 8);
+    }
+}
+
+void dequantize_row_turbo6_0(const block_turbo6_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TURBO6 == 0);
+    const int nb = k / QK_TURBO6;
+    const int d  = QK_TURBO6;
+
+    for (int block = 0; block < nb; block++) {
+        float norm = GGML_FP16_TO_FP32(x[block].norm);
+        float * dst = y + block * d;
+
+        /* Unpack 128 6-bit indices from qs[96] via the same accumulator pattern. */
+        uint32_t acc = 0;
+        int bits = 0;
+        int qpos = 0;
+        for (int i = 0; i < d; i++) {
+            while (bits < 6) {
+                acc |= ((uint32_t)x[block].qs[qpos++]) << bits;
+                bits += 8;
+            }
+            uint8_t idx = (uint8_t)(acc & 0x3F);
+            acc >>= 6;
+            bits -= 6;
+            dst[i] = CENTROIDS_6BIT[idx] * norm;
+        }
+        /* Output stays in the rotated WHT domain; the graph applies the
+         * inverse rotation via GGML_OP_TURBO_WHT on the attention output,
+         * matching the Turbo4 contract. */
+    }
+}
+
+size_t quantize_turbo6_0(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst,
+                         int64_t nrows, int64_t n_per_row, const float * imatrix) {
+    GGML_UNUSED(imatrix);
+    assert(n_per_row % QK_TURBO6 == 0);
+
+    size_t row_size = (n_per_row / QK_TURBO6) * sizeof(block_turbo6_0);
+    for (int64_t row = 0; row < nrows; row++) {
+        quantize_row_turbo6_0_ref(
+            src + row * n_per_row,
+            (block_turbo6_0 *)((char *)dst + row * row_size),
+            n_per_row
+        );
+    }
+    return nrows * row_size;
+}
+
 /* ================================================================== */
 /* TQ3_1S / TQ4_1S: WHT-rotated weight quantization                  */
 /* ================================================================== */
