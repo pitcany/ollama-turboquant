@@ -631,6 +631,56 @@ func TestInitKVCacheRejectsBadKeyLayerSpec(t *testing.T) {
 	}
 }
 
+// mockCacheNoSplit models a hybrid (e.g. attention+SSM) cache that only
+// implements the basic Init contract. It does NOT implement InitSplit or
+// SetKeyLayerDTypes — exercising the fallback paths.
+type mockCacheNoSplit struct {
+	initCalled bool
+	dtype      ml.DType
+}
+
+func (m *mockCacheNoSplit) Remove(seq int, beginIndex, endIndex int32) error { return nil }
+func (m *mockCacheNoSplit) SetLayer(layer int)                               {}
+func (m *mockCacheNoSplit) Get(ctx ml.Context) (ml.Tensor, ml.Tensor, ml.Tensor) {
+	return nil, nil, nil
+}
+func (m *mockCacheNoSplit) Put(ctx ml.Context, key, value ml.Tensor) {}
+func (m *mockCacheNoSplit) Init(backend ml.Backend, dtype ml.DType, maxSequences, capacity, maxBatch int) {
+	m.initCalled = true
+	m.dtype = dtype
+}
+func (m *mockCacheNoSplit) Close()                                                             {}
+func (m *mockCacheNoSplit) StartForward(ctx ml.Context, batch input.Batch, reserve bool) error { return nil }
+func (m *mockCacheNoSplit) CopyPrefix(srcSeq, dstSeq int, len int32)                           {}
+func (m *mockCacheNoSplit) SetConfig(ml.CacheConfig)                                           {}
+func (m *mockCacheNoSplit) CanResume(seq int, pos int32) bool                                  { return true }
+
+func TestInitKVCacheFallsBackOnSplitUnsupported(t *testing.T) {
+	cache := &mockCacheNoSplit{}
+	if err := initKVCache(cache, nil, "kq8-vturbo4", "", 2, 8, 4); err != nil {
+		t.Fatalf("initKVCache() error = %v, want nil (split-unsupported should fall back)", err)
+	}
+	if !cache.initCalled {
+		t.Fatal("Init() was not called as fallback")
+	}
+	if cache.dtype != ml.DTypeQ80 {
+		t.Fatalf("fallback dtype = %v, want %v (key dtype of kq8-vturbo4)", cache.dtype, ml.DTypeQ80)
+	}
+}
+
+func TestInitKVCacheDropsLayerOverridesWhenUnsupported(t *testing.T) {
+	cache := &mockCacheNoSplit{}
+	if err := initKVCache(cache, nil, "turbo4", "0:q8_0,27:q8_0", 2, 8, 4); err != nil {
+		t.Fatalf("initKVCache() error = %v, want nil (per-layer-unsupported should warn-and-drop)", err)
+	}
+	if !cache.initCalled {
+		t.Fatal("Init() was not called")
+	}
+	if cache.dtype != ml.DTypeTurbo4 {
+		t.Fatalf("dtype = %v, want %v", cache.dtype, ml.DTypeTurbo4)
+	}
+}
+
 type fakeBackend struct {
 	devices []ml.DeviceInfo
 }

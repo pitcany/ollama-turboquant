@@ -272,7 +272,7 @@ func NewLlamaServer(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, modelPath st
 
 			if isTurboquantAdaptiveSentinel(kvct) {
 				resolved, source := resolveAdaptiveCacheType(f)
-				slog.Info("turboquant-adaptive resolved", "cache_type", resolved, "source", source)
+				slog.Info("turboquant-adaptive resolved", "cache_type", resolved, "manifest_source", source)
 				kvct = resolved
 			}
 
@@ -458,7 +458,7 @@ func applyTurboquantAdaptive(loadRequest *LoadRequest, f *ggml.GGML) error {
 	}
 	loadRequest.KeyCacheLayerTypes = calibration.CanonicalKeyLayerSpec(overrides)
 	slog.Info("applied turboquant-adaptive calibration",
-		"source", source,
+		"manifest_source", source,
 		"model", a.Model,
 		"base_kv_cache_type", a.BaseKVCacheType,
 		"key_cache_layer_types", loadRequest.KeyCacheLayerTypes,

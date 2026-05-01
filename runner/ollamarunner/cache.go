@@ -73,9 +73,22 @@ func initKVCache(cache kvcache.Cache, backend ml.Backend, kvCacheType, keyCacheL
 			InitSplit(ml.Backend, ml.DType, ml.DType, int, int, int)
 		})
 		if !ok {
-			return fmt.Errorf("cache does not support split key/value dtypes: key=%v value=%v", keyDType, valueDType)
+			// Hybrid attention+SSM caches (e.g. qwen3.5/3.6 *HybridCache) do
+			// not implement split K/V dtypes. Fall back to the higher-precision
+			// (key) dtype for both K and V so the model still loads with a
+			// quantized cache; warn so the operator knows the value dtype was
+			// upgraded. This keeps the runtime usable for users who set
+			// OLLAMA_KV_CACHE_TYPE=kq8-vturbo4 or turboquant-adaptive on
+			// hybrid models.
+			slog.Warn("cache does not support split key/value dtypes; using key dtype for both",
+				"requested_key_dtype", keyDType,
+				"requested_value_dtype", valueDType,
+				"effective_dtype", keyDType,
+			)
+			cache.Init(backend, keyDType, maxSequences, capacity, maxBatch)
+		} else {
+			split.InitSplit(backend, keyDType, valueDType, maxSequences, capacity, maxBatch)
 		}
-		split.InitSplit(backend, keyDType, valueDType, maxSequences, capacity, maxBatch)
 	}
 
 	if strings.TrimSpace(keyCacheLayerTypes) == "" {
@@ -92,7 +105,14 @@ func initKVCache(cache kvcache.Cache, backend ml.Backend, kvCacheType, keyCacheL
 		SetKeyLayerDTypes(map[int]ml.DType)
 	})
 	if !ok {
-		return fmt.Errorf("cache does not support per-layer key dtype overrides")
+		// Same fallback rationale as the split-init path: if the cache cannot
+		// honor per-layer key dtype overrides (hybrid caches today), drop the
+		// overrides with a warning instead of failing the model load. The
+		// uniform key dtype already chosen above is the conservative choice.
+		slog.Warn("cache does not support per-layer key dtype overrides; dropping overrides",
+			"spec", calibration.CanonicalKeyLayerSpec(overrides),
+		)
+		return nil
 	}
 	dtypes := make(map[int]ml.DType, len(overrides))
 	for layer, name := range overrides {
