@@ -1601,3 +1601,99 @@ tonbistudio observation) is supported. The residual representation
 is NOT the fundamental bottleneck for K accuracy; bit-count was.
 Phase D (CUDA kernels) is justified — without CUDA the preset is
 operator-impractical.
+
+## 2026-05-01 - kturbo6-vturbo4 full Phase 0 cleared, preview gate removed
+
+Goal: full 256-sequence Phase 0 promotion gate for the new
+`kturbo6-vturbo4` preset on `qwen2.5:7b` Q4_K_M.
+
+Command (mixed CPU+GPU, 20 of 29 layers offloaded to GPU 1 because
+the RTX 5090 had only 8.5 GB free under the existing VLLM workload):
+
+```bash
+CUDA_VISIBLE_DEVICES=1 \
+OLLAMA_TURBOQUANT_K6_PREVIEW=1 \
+GOCACHE=/tmp/ollama-build-gocache \
+OLLAMA_LIBRARY_PATH=/home/yannik/Work/ollama-build/build/lib/ollama \
+LD_LIBRARY_PATH=/home/yannik/Work/ollama-build/build/lib/ollama/cuda_v12:/home/yannik/Work/ollama-build/build/lib/ollama \
+go run ./cmd/turboquant-eval \
+  -model qwen2.5:7b \
+  -snapshot tools/turboquant/testdata/qwen25_7b_phase0_tokens.json \
+  -engine go -num-ctx 1024 -batch-size 512 -num-gpu-layers 20 \
+  -flash-attention=true -reference-kv-cache-type f16 \
+  -kv-cache-preset kturbo6-vturbo4 \
+  -format json
+```
+
+Result:
+
+```
+num_sequences=256, token_count=261888,
+mean_nll=2.144526462226762,
+perplexity=8.537997215681742,
+mean_kl=0.012724557428679966,
+duration=1725.1s
+```
+
+### Comparison to other promoted presets
+
+| cache | mean_nll | perplexity | mean_kl | bytes/pair |
+|---|---:|---:|---:|---:|
+| llama f16 | 2.14184 | 8.51509 | -        | 4.000 |
+| kq8-vturbo4 | 2.15086 | 8.59224 | 0.01706 | 1.531 |
+| **kturbo6-vturbo4** | **2.14453** | **8.53800** | **0.01272** | **1.312** |
+
+`kturbo6-vturbo4` strictly Pareto-dominates `kq8-vturbo4` on every
+quality metric AND uses 14% less memory per K/V pair. Mean NLL gap
+to f16 reference is 0.003 — essentially indistinguishable. The
+~25% lower mean KL vs `kq8-vturbo4` is the headline number.
+
+### Decision: PROMOTE — drop the OLLAMA_TURBOQUANT_K6_PREVIEW gate
+
+Phase 0 success criterion was `mean_kl < 0.02`. We landed at 0.01272,
+under by 36%. Stretch goal "match or beat kq8-vturbo4 at strictly
+lower memory" is also achieved.
+
+Per the plan abort/promote contract, the preview flag comes off
+once Phase 0 clears. Removed:
+
+- `envconfig.TurboquantK6Preview` variable and the
+  `OLLAMA_TURBOQUANT_K6_PREVIEW` entry in `AsMap()`.
+- The two runtime gates in `llm/server.go` that warned and cleared
+  `loadRequest.KvCacheType` when the flag was unset (one for the
+  legacy llama runner, one for the Ollama-engine flash-attention
+  path).
+- The `TestTurboquantK6PreviewGate` test in `llm/server_test.go`
+  and the now-unused `envconfig` import.
+
+`kturbo6-vturbo4` is now operator-accessible via
+`OLLAMA_KV_CACHE_TYPE=kturbo6-vturbo4` with no extra env var
+required, matching the existing `kq8-vturbo4` UX.
+
+### Hardware caveat
+
+Full-GPU offload (29/29 layers) OOMed on the 5090 because of an
+existing VLLM workload occupying 23 GB. The 20-layer offload run
+makes the recorded duration (1725.1s) not directly comparable to
+the existing `kq8-vturbo4` (1123.3s) and adaptive (1159.0s) rows,
+which used full GPU on a free RTX 4090. A same-config rerun on a
+free GPU is a clean follow-up but does not affect the quality
+promotion decision.
+
+### Out-of-scope follow-ups
+
+- Same-config Phase 0 rerun on a free GPU for fair duration
+  comparison.
+- Vectorised CUDA KQ inner-product for Turbo5/6 (current
+  implementation is per-element decode; the bulk 32-bit-fetch path
+  used by Turbo4 doesn't apply because 5/6-bit indices don't
+  byte-align). A follow-up could implement a 64-bit-fetch path
+  that decodes ~10 elements per fetch, modulo bit-extract
+  bookkeeping.
+- InnerQ per-channel equalisation for Turbo5/6 set-rows. CPU smoke
+  cleared the gate without it; CUDA pre-promotion gate cleared it
+  too. Adding it could improve quality further on heavily skewed
+  channel distributions.
+- Metal kernels. Turbo5/6 are CPU + CUDA only this PR.
+- Per-layer adaptive integration (Turbo5/Turbo6 entries in the
+  calibration manifest).

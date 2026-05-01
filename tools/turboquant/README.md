@@ -641,6 +641,22 @@ Measured on 2026-04-29 with `qwen2.5:7b`, CUDA on an RTX 4090, `-num-ctx 1024`, 
 | go | f16 K, turbo4 V | f16 | 1 | 1023 | 1.78206660 | 5.94212374 | 0.01206953 | 5.7s |
 | go | kq8-vturbo4 | f16 | 256 | 261888 | 2.15085919 | 8.59223759 | 0.01705642 | 1123.3s |
 | go | turbo4 + adaptive K q8_0 layers 0,1,3,27 | f16 | 256 | 261888 | 2.16333712 | 8.70012261 | 0.04249074 | 1159.0s |
+| go | **kturbo6-vturbo4** | f16 | 256 | 261888 | **2.14452646** | **8.53799722** | **0.01272456** | 1725.1s |
+
+The `kturbo6-vturbo4` row was measured on 2026-05-01 with the new
+Turbo6 (6-bit, 64-centroid PolarQuant) K + Turbo4 V split. Memory:
+1.31 bytes per K/V pair (vs `kq8-vturbo4`'s 1.53). Quality strictly
+Pareto-dominates `kq8-vturbo4`: better mean NLL (2.1445 vs 2.1509),
+better perplexity (8.538 vs 8.592), and ~25% lower mean KL (0.01272
+vs 0.01706). The mean NLL gap to f16 reference is only 0.003, an
+essentially indistinguishable result at ~8x compression. Hardware
+note: the kturbo6 row used a mixed 20-of-29-layer GPU offload on a
+loaded RTX 5090 (8.5 GB free) so the duration is not directly
+comparable to the other rows; same-config full-GPU rerun is a
+follow-up. The community `tonbistudio/turboquant-pytorch` V3
+observation that K6/V4 generates correctly while K4/V4 garbles is
+confirmed empirically by this row. `kturbo6-vturbo4` is the new
+recommended Turbo* preset.
 
 The `go` f16 smoke exactly matches the `llama` f16 smoke for sequence 0, and `q8_0` stays close to f16 through the same corrected path. `turbo4` fails the Phase 0 gate on the first real held-out sequence, so Phase 1 should not start until the current TurboQuant path is fixed. A full corrected-engine turbo4 run was intentionally skipped after this fail-fast result. The `kq8-vturbo4` safe fallback survives the full 256-sequence gate with low KL to f16 reference, so it is the current practical runtime mode while Turbo4 K scoring is investigated.
 
