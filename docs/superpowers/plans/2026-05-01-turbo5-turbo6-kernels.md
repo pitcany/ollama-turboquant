@@ -213,7 +213,11 @@ The exact code mirrors the Turbo4 case. Cannot show full code here without first
 - [ ] **Step 3: Run the test (it should fail with "type not registered" — kernels not yet implemented)**
 
 ```bash
-cd tools/turboquant && cmake -S . -B build && cmake --build build --target block_error && ./build/block_error
+g++ -std=c++17 -O2 -Iml/backend/ggml/ggml/include -Iml/backend/ggml/ggml/src \
+  tools/turboquant/block_error.cpp \
+  -Lbuild/lib/ollama -lggml-base -ldl -lpthread -lm \
+  -Wl,-rpath=$(pwd)/build/lib/ollama \
+  -o /tmp/turboquant-block-error && /tmp/turboquant-block-error
 ```
 
 Expected: failure on Turbo5/Turbo6 cases. This documents the Phase A→B handoff: Phase B Task B6 will rerun this and require pass.
@@ -497,7 +501,11 @@ GOCACHE=/tmp/ollama-build-gocache cmake --build build -j2
 - [ ] **Step 4: Run the synthetic block-error test from Task A2**
 
 ```bash
-cd tools/turboquant && cmake --build build --target block_error && ./build/block_error
+g++ -std=c++17 -O2 -Iml/backend/ggml/ggml/include -Iml/backend/ggml/ggml/src \
+  tools/turboquant/block_error.cpp \
+  -Lbuild/lib/ollama -lggml-base -ldl -lpthread -lm \
+  -Wl,-rpath=$(pwd)/build/lib/ollama \
+  -o /tmp/turboquant-block-error && /tmp/turboquant-block-error --assert-bounds
 ```
 
 Expected: PASS. Per-element MSE for Turbo5 and Turbo6 must be within 1.2× of the high-rate PCM bound for σ=1/√128. **If this fails, Phase B is not done; do not proceed.**
