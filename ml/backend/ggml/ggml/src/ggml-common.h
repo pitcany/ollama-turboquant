@@ -322,6 +322,31 @@ typedef struct {
 } block_turbo2_0;                       // 10 bytes total
 static_assert(sizeof(block_turbo2_0) == sizeof(ggml_half) + QK_TURBO2/4, "wrong turbo2_0 block size/padding");
 
+/* TurboQuant 5-bit: 5-bit PolarQuant indices, no QJL, no residual */
+#define QK_TURBO5 128
+#define QK_TURBO5_GROUP 128  /* rotation group size = head_dim */
+/* Derived: FA template nl parameters (auto-scale with block size) */
+#define NL_TURBO5     (QK_TURBO5 / 16)
+#define NL_TURBO5_VEC (QK_TURBO5 / 4)
+typedef struct {
+    ggml_half  norm;                          /*  2 bytes: corrected L2 norm */
+    ggml_half  rnorm;                         /*  2 bytes: reserved (kept for layout symmetry with Turbo4) */
+    uint8_t    qs[QK_TURBO5 * 5 / 8];        /* 80 bytes: 5-bit indices, bit-packed */
+} block_turbo5_0;                             /* 84 bytes total */
+static_assert(sizeof(block_turbo5_0) == 2*sizeof(ggml_half) + QK_TURBO5*5/8, "wrong turbo5_0 block size");
+
+/* TurboQuant 6-bit: 6-bit PolarQuant indices, no QJL, no residual */
+#define QK_TURBO6 128
+#define QK_TURBO6_GROUP 128
+#define NL_TURBO6     (QK_TURBO6 / 16)
+#define NL_TURBO6_VEC (QK_TURBO6 / 4)
+typedef struct {
+    ggml_half  norm;                          /*  2 bytes: corrected L2 norm */
+    ggml_half  rnorm;                         /*  2 bytes: reserved (kept for layout symmetry with Turbo4) */
+    uint8_t    qs[QK_TURBO6 * 6 / 8];        /* 96 bytes: 6-bit indices, bit-packed */
+} block_turbo6_0;                             /* 100 bytes total */
+static_assert(sizeof(block_turbo6_0) == 2*sizeof(ggml_half) + QK_TURBO6*6/8, "wrong turbo6_0 block size");
+
 // TQ3_1S: WHT-rotated 3-bit weight quantization (8-level Lloyd-Max for N(0,1))
 // Block size 32, dual half-block scales (d0 for [0..15], d1 for [16..31])
 // Per block: d0(fp16) + d1(fp16) + 3-bit indices packed (12 bytes) = 16 bytes per 32 values
