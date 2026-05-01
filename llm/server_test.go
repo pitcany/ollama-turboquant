@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/ollama/ollama/api"
+	"github.com/ollama/ollama/envconfig"
 	"github.com/ollama/ollama/format"
 	"github.com/ollama/ollama/fs/ggml"
 	"github.com/ollama/ollama/ml"
@@ -21,9 +22,37 @@ func TestIsSplitKVCachePreset(t *testing.T) {
 	if !isSplitKVCachePreset("kq8-vturbo4") {
 		t.Fatal("expected kq8-vturbo4 to be treated as a split KV cache preset")
 	}
+	if !isSplitKVCachePreset("kturbo6-vturbo4") {
+		t.Fatal("expected kturbo6-vturbo4 to be treated as a split KV cache preset")
+	}
 	if isSplitKVCachePreset("turbo4") {
 		t.Fatal("did not expect turbo4 to be treated as a split KV cache preset")
 	}
+}
+
+// TestTurboquantK6PreviewGate verifies that the kturbo6-vturbo4 split preset
+// is gated behind OLLAMA_TURBOQUANT_K6_PREVIEW. With the flag unset (or
+// "0") TurboquantK6Preview() is false; with the flag set to "1" it is true.
+// The runtime acceptance path in server.go consults this exact predicate.
+func TestTurboquantK6PreviewGate(t *testing.T) {
+	t.Run("default unset is rejected", func(t *testing.T) {
+		t.Setenv("OLLAMA_TURBOQUANT_K6_PREVIEW", "")
+		if envconfig.TurboquantK6Preview() {
+			t.Fatal("expected TurboquantK6Preview to be false when unset")
+		}
+	})
+	t.Run("explicit zero is rejected", func(t *testing.T) {
+		t.Setenv("OLLAMA_TURBOQUANT_K6_PREVIEW", "0")
+		if envconfig.TurboquantK6Preview() {
+			t.Fatal("expected TurboquantK6Preview to be false when set to 0")
+		}
+	})
+	t.Run("explicit one is accepted", func(t *testing.T) {
+		t.Setenv("OLLAMA_TURBOQUANT_K6_PREVIEW", "1")
+		if !envconfig.TurboquantK6Preview() {
+			t.Fatal("expected TurboquantK6Preview to be true when set to 1")
+		}
+	})
 }
 
 func TestIsTurboquantAdaptiveSentinel(t *testing.T) {
@@ -56,6 +85,10 @@ func TestApplyEmbeddingTurboquantFallback(t *testing.T) {
 		{
 			name:        "split preset env ignored",
 			kvCacheType: "kq8-vturbo4",
+		},
+		{
+			name:        "k6 split preset env ignored",
+			kvCacheType: "kturbo6-vturbo4",
 		},
 		{
 			name:        "adaptive sentinel env ignored",

@@ -218,6 +218,10 @@ var (
 	DebugLogRequests = Bool("OLLAMA_DEBUG_LOG_REQUESTS")
 	// KvCacheType is the quantization type for the K/V cache.
 	KvCacheType = String("OLLAMA_KV_CACHE_TYPE")
+	// TurboquantK6Preview enables the preview kturbo6-vturbo4 split KV
+	// cache preset. Default off; the preset is in Phase 0 evaluation and
+	// not yet promoted to operator-facing default.
+	TurboquantK6Preview = Bool("OLLAMA_TURBOQUANT_K6_PREVIEW")
 	// TurboquantCalibration is the path to a TurboQuant calibration JSON
 	// artifact produced by cmd/turboquant-calibrate. When set, the Ollama
 	// engine uses the artifact's base K/V cache type as the effective KV
@@ -314,6 +318,7 @@ func AsMap() map[string]EnvVar {
 		"OLLAMA_FLASH_ATTENTION":    {"OLLAMA_FLASH_ATTENTION", FlashAttention(false), "Enabled flash attention"},
 		"OLLAMA_KV_CACHE_TYPE":      {"OLLAMA_KV_CACHE_TYPE", KvCacheType(), "Quantization type for the K/V cache (default: f16; Ollama engine also supports kq8-vturbo4 and turboquant-adaptive)"},
 		"OLLAMA_TURBOQUANT_CALIBRATION": {"OLLAMA_TURBOQUANT_CALIBRATION", TurboquantCalibration(), "Path to a TurboQuant calibration JSON artifact (Ollama engine only); overrides OLLAMA_KV_CACHE_TYPE and applies per-layer key dtype overrides"},
+		"OLLAMA_TURBOQUANT_K6_PREVIEW":  {"OLLAMA_TURBOQUANT_K6_PREVIEW", TurboquantK6Preview(), "Enable the preview kturbo6-vturbo4 split KV cache preset"},
 		"OLLAMA_GPU_OVERHEAD":       {"OLLAMA_GPU_OVERHEAD", GpuOverhead(), "Reserve a portion of VRAM per GPU (bytes)"},
 		"OLLAMA_HOST":               {"OLLAMA_HOST", Host(), "IP Address for the ollama server (default 127.0.0.1:11434)"},
 		"OLLAMA_KEEP_ALIVE":         {"OLLAMA_KEEP_ALIVE", KeepAlive(), "The duration that models stay loaded in memory (default \"5m\")"},

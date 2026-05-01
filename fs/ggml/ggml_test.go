@@ -14,6 +14,7 @@ func TestKVCacheBytesPerElementKV(t *testing.T) {
 		{name: "shared f16 default", in: "f16", wantK: 2, wantV: 2},
 		{name: "shared turbo4", in: "turbo4", wantK: 68.0 / 128.0, wantV: 68.0 / 128.0},
 		{name: "safe split preset", in: "kq8-vturbo4", wantK: 1, wantV: 68.0 / 128.0},
+		{name: "k6 split preset", in: "kturbo6-vturbo4", wantK: 100.0 / 128.0, wantV: 68.0 / 128.0},
 	}
 
 	for _, tt := range tests {
@@ -32,6 +33,12 @@ func TestKVCacheBytesPerElement(t *testing.T) {
 	}
 	if got, want := kvCacheBytesPerElement("turbo4"), 68.0/128.0; got != want {
 		t.Fatalf("turbo4 bytes/element = %v, want %v", got, want)
+	}
+	if got, want := kvCacheBytesPerElement("turbo5"), 84.0/128.0; got != want {
+		t.Fatalf("turbo5 bytes/element = %v, want %v", got, want)
+	}
+	if got, want := kvCacheBytesPerElement("turbo6"), 100.0/128.0; got != want {
+		t.Fatalf("turbo6 bytes/element = %v, want %v", got, want)
 	}
 	// f16 default fallback
 	if got, want := kvCacheBytesPerElement("f16"), 2.0; got != want {

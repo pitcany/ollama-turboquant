@@ -15,7 +15,7 @@ type turboWHT interface {
 // isTurboDType checks if a DType is a TurboQuant KV cache type
 func isTurboDType(dt ml.DType) bool {
 	switch dt {
-	case ml.DTypeTurbo2, ml.DTypeTurbo3, ml.DTypeTurbo4:
+	case ml.DTypeTurbo2, ml.DTypeTurbo3, ml.DTypeTurbo4, ml.DTypeTurbo5, ml.DTypeTurbo6:
 		return true
 	}
 	return false

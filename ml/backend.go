@@ -412,6 +412,8 @@ const (
 	DTypeTurbo2
 	DTypeTurbo3
 	DTypeTurbo4
+	DTypeTurbo5
+	DTypeTurbo6
 )
 
 type SamplingMode int

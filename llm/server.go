@@ -242,7 +242,12 @@ func NewLlamaServer(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, modelPath st
 
 		if kvct != "" && !embeddingTurboquantFallback {
 			if isSplitKVCachePreset(kvct) || isTurboquantAdaptiveSentinel(kvct) {
-				slog.Warn("OLLAMA_KV_CACHE_TYPE preset requires the Ollama engine", "type", kvct)
+				if strings.EqualFold(kvct, "kturbo6-vturbo4") && !envconfig.TurboquantK6Preview() {
+					slog.Warn("OLLAMA_KV_CACHE_TYPE=kturbo6-vturbo4 requires OLLAMA_TURBOQUANT_K6_PREVIEW=1 (Phase 0 not yet promoted)", "type", kvct)
+					loadRequest.KvCacheType = ""
+				} else {
+					slog.Warn("OLLAMA_KV_CACHE_TYPE preset requires the Ollama engine", "type", kvct)
+				}
 			} else if f.KVCacheTypeIsQuantized(kvct) {
 				if flashAttention != ml.FlashAttentionEnabled {
 					slog.Warn("OLLAMA_FLASH_ATTENTION must be enabled to use a quantized OLLAMA_KV_CACHE_TYPE", "type", kvct)
@@ -276,9 +281,13 @@ func NewLlamaServer(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, modelPath st
 				kvct = resolved
 			}
 
-			// Flash Attention also supports kv cache quantization
-			// Enable if the requested and kv cache type is supported by the model
-			if f.SupportsKVCacheType(kvct) {
+			if strings.EqualFold(kvct, "kturbo6-vturbo4") && !envconfig.TurboquantK6Preview() {
+				slog.Warn("OLLAMA_KV_CACHE_TYPE=kturbo6-vturbo4 requires OLLAMA_TURBOQUANT_K6_PREVIEW=1 (Phase 0 not yet promoted)", "type", kvct)
+				kvct = ""
+				loadRequest.KvCacheType = ""
+			} else if f.SupportsKVCacheType(kvct) {
+				// Flash Attention also supports kv cache quantization
+				// Enable if the requested and kv cache type is supported by the model
 				loadRequest.KvCacheType = kvct
 			} else {
 				slog.Warn("kv cache type not supported by model", "type", kvct)
@@ -362,7 +371,11 @@ func NewLlamaServer(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, modelPath st
 }
 
 func isSplitKVCachePreset(cacheType string) bool {
-	return cacheType == "kq8-vturbo4"
+	switch cacheType {
+	case "kq8-vturbo4", "kturbo6-vturbo4":
+		return true
+	}
+	return false
 }
 
 func isEmbeddingModel(kv ggml.KV) bool {
