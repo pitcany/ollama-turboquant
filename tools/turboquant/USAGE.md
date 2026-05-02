@@ -15,22 +15,41 @@ runtime gracefully downgrades to `q8_0` with a loud warning — see
 
 ## 1. Install the binary
 
-The fork ships as a drop-in `ollama-tq` binary plus a small
-`ollama-serve-tq` wrapper script that sets the right env vars. The
-typical layout (matching `~/.local/bin/ollama-serve-tq`):
-
-```text
-~/.local/bin/ollama-tq           # the binary built from this fork
-~/.local/bin/ollama-serve-tq     # wrapper script (sets env, runs serve)
-~/.local/lib/ollama -> <build dir>/build/lib/ollama
-```
-
-To install or refresh the binary off the latest branch:
+### Option A — prebuilt release (recommended for end users)
 
 ```bash
-cd ~/Work/ollama-build
-git checkout turboquant/hybridcache-split-init
-git pull turboquant turboquant/hybridcache-split-init
+curl -fsSL https://raw.githubusercontent.com/pitcany/ollama-turboquant/turboquant/runtime/scripts/install-tq.sh \
+  | bash -s -- --systemd --symlink-ollama
+```
+
+This pulls the latest release tarball from GitHub, drops files under
+`~/.local/{bin,lib,share}`, installs the systemd unit (with sudo
+prompt), symlinks `ollama -> ollama-tq` so the standard `ollama` CLI
+renders the `KV Cache` section, and appends `OLLAMA_HOST=http://localhost:8001`
+to `~/.bashrc`. Drop any of the flags to skip parts:
+
+- `--systemd` — install + enable the systemd unit
+- `--symlink-ollama` — alias `ollama` to the fork's binary
+- `--no-bashrc` — skip the OLLAMA_HOST export
+- `--version vX.Y.Z` — pin a specific release tag (default: latest)
+- `--local /path/to/tarball` — offline install from a downloaded tarball
+- `--force` — overwrite existing files instead of backing up
+- `--prefix DIR` — install elsewhere than `$HOME/.local`
+
+After install, open a new shell (so `OLLAMA_HOST` takes effect) and
+verify:
+
+```bash
+ollama show qwen2.5:7b   # should include 'KV Cache' section
+```
+
+### Option B — build from source (maintainers / new architectures)
+
+```bash
+git clone https://github.com/pitcany/ollama-turboquant.git
+cd ollama-turboquant
+git checkout turboquant/runtime
+git pull origin turboquant/runtime
 
 GOCACHE=/tmp/ollama-build-gocache go build -o ~/.local/bin/ollama-tq .
 
@@ -40,6 +59,14 @@ GOCACHE=/tmp/ollama-build-gocache go build -o ~/.local/bin/ollama-tq .
 # calibration pipeline) but not for the serve path.
 test -f build/lib/ollama/libggml-cuda.so && \
   mv build/lib/ollama/libggml-cuda.so /tmp/ollama-build-libggml-cuda-flat-$(date +%s).so
+```
+
+Layout the binary expects:
+
+```text
+~/.local/bin/ollama-tq           # the binary built from this fork
+~/.local/bin/ollama-serve-tq     # wrapper script (sets env, runs serve)
+~/.local/lib/ollama -> <build dir>/build/lib/ollama
 ```
 
 The binary discovers the runtime backend via `../lib/ollama` relative
