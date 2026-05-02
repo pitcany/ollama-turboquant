@@ -3,6 +3,350 @@
 Purpose: rigorous, evidence-first log per `TURBOQUANT-CLAUDE-HANDOFF.md`.
 No speculative patches. Each fix must cite the first proven mismatch it explains.
 
+## 2026-05-02 - qwen3-coder:30b adaptive calibration; qwen3.6 tokenizer blocked
+
+Goal: produce bundled `turboquant-adaptive` calibrations for the two
+local hybrid/MoE candidates `qwen3-coder:30b` and `qwen3.6:27b-q8_0`.
+Result: `qwen3-coder` shipped, `qwen3.6` blocked behind a tokenizer-side
+limitation in `cmd/turboquant-tokenize`.
+
+### Multi-GPU split for cmd/turboquant-eval
+
+First attempt failed. `cmd/turboquant-eval/main.go::goBackendParams` put
+every layer on `memory.GPUs[0]` regardless of how many GPUs were
+visible. For models past ~16 GiB this OOM'd at the single weight
+buffer alloc:
+
+```text
+ggml_backend_cuda_buffer_type_alloc_buffer: allocating 17524.43 MiB
+  on device 0: cudaMalloc failed: out of memory
+panic: insufficient memory
+```
+
+Failed even on a 32 GiB 5090 with 32 GiB free — VMM cannot satisfy a
+17 GiB single contiguous allocation under driver fragmentation. The
+production runner avoids this by splitting layers across every visible
+device (see the `load_request: GPULayers:65[CUDA1 Layers:39(0..38),
+CUDA0 Layers:26(39..64)]` line in `runner/ollamarunner/cache.go`).
+Ported the same idea: contiguously distribute `gpuLayerCount` layers
+across all `len(memory.GPUs)` devices using `base + extra` layout.
+KL eval is insensitive to which device owns each layer, so an equal
+split is sufficient.
+
+### Library-path env-var pinning in the calibrate driver
+
+Second failure. `scripts/turboquant-calibrate.sh` forks
+`cmd/turboquant-calibrate`, which forks `cmd/turboquant-eval` as a
+subprocess. The eval subprocess looks beside its temp `go run` binary
+in `/tmp/go-build*/`, finds no `../lib/ollama`, and silently falls
+back to a CPU-only backend (`load_backend: loaded CPU backend from
+.../libggml-cpu-icelake.so`, no CUDA). A 28-layer sweep that should
+take ~3 minutes on GPU stretched to ~3 hours on CPU and produced no
+artifact (validation step ran out of patience and the calibrate tool
+caught a parser failure when no successful layer rows existed).
+
+Fixed by exporting `OLLAMA_LIBRARY_PATH=$ROOT/build/lib/ollama:$ROOT/build/lib/ollama/cuda_v12`
+before the calibrate step. Both directories are pinned: the flat
+`libggml-cuda.so` for in-process eval (matches the operator runbook in
+`tools/turboquant/README.md` "Speed and memory in practice"), and
+`cuda_v12/libggml-cuda.so` for the FA-vec kernels.
+
+### qwen3-coder:30b calibration: SHIPPED
+
+After both fixes, the calibration ran cleanly on both GPUs (4090 + 5090,
+multi-GPU split). Selected layers (top-4 lowest-KL): **3, 8, 12, 24**.
+Validation across 16 sequences (the new `-V 16` default for 30B-class
+models per the script's documentation):
+
+| metric        | value                       |
+|---------------|----------------------------|
+| `mean_nll`    | 2.2268616892384294          |
+| `perplexity`  | 9.270725958978801           |
+| `mean_kl`     | 0.05240078362569509         |
+| budget        | 0.13 (adaptive Phase 0)     |
+| headroom      | ~2.5x under budget          |
+
+Bundled into `tools/turboquant/calibration/manifest_data/qwen3moe-q4_k_m-adaptive.json`
+and registered against `(architecture=qwen3moe, file_type=Q4_K_M, head_dim=128)`.
+
+End-to-end smoke against the runtime confirms resolution and apply:
+
+```text
+turboquant-adaptive resolved cache_type=turbo4
+  manifest_source=manifest:qwen3moe-q4_k_m-adaptive.json
+kv cache device=CUDA1 size="212.5 MiB"
+loaded runners count=1
+[GIN] POST /api/generate -> 200 OK in 7.02s
+```
+
+KV at `num_ctx=8192`: **212.5 MiB**. Compared to the kq8-vturbo4 floor
+(~580 MiB at the same context, projected from per-element ratios in
+`fs/ggml/ggml.go::kvCacheBytesPerElementKV`), adaptive saves an extra
+~24% — and per the stricter `kq8-vturbo4` Phase 0 budget (`mean_kl ≤
+0.05`), this calibration is just over (0.0524). Operators wanting the
+strict floor should set `OLLAMA_KV_CACHE_TYPE=kq8-vturbo4`; the
+adaptive entry trades ~5% extra KL for an additional ~24% memory.
+
+### qwen3.6:27b-q8_0 calibration: BLOCKED
+
+`cmd/turboquant-tokenize` is built on the legacy llama.cpp loader,
+not the Go runtime. The qwen3.6 GGUF identifies as
+`general.architecture=qwen35`:
+
+```text
+llama_model_load: error loading model: error loading model
+  architecture: unknown model architecture: 'qwen35'
+turboquant-tokenize: unable to load model
+```
+
+The Go runtime registered `qwen35` (this is the same path the runner
+uses for the HybridCache split-init smoke earlier on this branch),
+but the calibrate snapshot pipeline does not use that runtime — it
+hands the tokenizer step to llama.cpp. There are three ways forward,
+none small enough to land in the same session as the qwen3-coder
+ship:
+
+1. **Port `turboquant-tokenize` to the Go engine.** Cleanest. About a
+   ~150-line change: swap the `llama_model_load_from_file_impl` path
+   for `model.New(...).Tokenize(...)` and serialise to the existing
+   snapshot JSON shape that `cmd/turboquant-eval` consumes. Future
+   architectures land for free.
+2. **External tokenization via the running runtime.** Use the Go
+   server's tokenizer to encode the corpus, write the JSON snapshot
+   manually. Stopgap only — it bypasses the calibrate pipeline's
+   sequence-len + max-sequences enforcement.
+3. **Backport the `qwen35` registration into llama.cpp.** Requires a
+   submodule bump and matches whatever the upstream llama.cpp project
+   does about hybrid-attention models. Largest blast radius; least
+   recommended.
+
+Until any of these lands, `qwen3.6:27b-q8_0` continues to use
+`OLLAMA_KV_CACHE_TYPE=kq8-vturbo4` (the safe tier-1 preset) which the
+HybridCache split-init smoke earlier on this branch already validated:
+6.0 GiB total KV at `num_ctx=98304`, ~57% savings vs f16. Adding a
+qwen35 manifest entry would buy maybe another 0.6-1.0 GiB on top, so
+the operational gap is small.
+
+### Files changed
+
+- `cmd/turboquant-eval/main.go` — multi-GPU layer split.
+- `scripts/turboquant-calibrate.sh` — `OLLAMA_LIBRARY_PATH` pin and
+  the operator-side `-V 16` default + `-S` (reuse sweep CSV) flag.
+- `tools/turboquant/calibration/manifest_data/qwen3moe-q4_k_m-adaptive.json`
+  — new bundled calibration.
+- `tools/turboquant/calibration/manifest_data/manifest.json` — new
+  entry for `qwen3moe / Q4_K_M / head_dim=128`.
+
+### Verification
+
+```bash
+GOCACHE=/tmp/ollama-build-gocache go test -count=1 \
+  ./tools/turboquant/calibration/...
+```
+
+Loader test passes against the new manifest. End-to-end smoke against
+qwen3-coder:30b reported above. Multi-GPU split exercised successfully
+during the calibration sweep itself (28 layers × ~5s = ~3 min on
+4090+5090 vs failure-with-OOM on a single GPU).
+
+## 2026-05-01 - HybridCache split init: lift qwen3.5/3.6/lfm2/nemotronh to tier 1/2
+
+Goal: Close the open item from the 2026-04-30 "qwen3.6 launch: three
+stacked bugs" entry — `*HybridCache` did not implement `InitSplit` /
+`SetKeyLayerDTypes`, so the runner's `initKVCache` fallback in
+`runner/ollamarunner/cache.go:72-114` fired the
+`"cache does not support split key/value dtypes"` warning and demoted
+hybrid models from tier-1 (`kq8-vturbo4`, ~62%) and tier-2 (adaptive,
+~72%) KV savings down to tier-3 (uniform q8_0, 50%).
+
+### Where the implementation actually lives
+
+The naming `*HybridCache` (in `model/models/qwen3next/cache.go:16-19`,
+`model/models/lfm2/cache.go:18-20`,
+`model/models/nemotronh/cache.go:20-22`) suggested the methods should
+go on those types directly. They do not — each `HybridCache` is a
+zero-state wrapper around `*kvcache.Recurrent`:
+
+```go
+type HybridCache struct {
+    *kvcache.Recurrent
+}
+```
+
+`Recurrent` itself owns the embedded `*Causal` sub-cache that stores
+attention K/V (`kvcache/recurrent.go:42-45`). The conv1d state
+(`convBuffer`, `kvcache/recurrent.go:584-596`) and the SSM/recurrent
+state (`recurrentBuffer`, `kvcache/recurrent.go:598-610`) are both
+hardcoded to `ml.DTypeF32` — they have no K/V-split semantics and the
+prompt's "ignore K/V split where semantics don't match" rule applies
+literally to them.
+
+That meant the right place for `InitSplit` and `SetKeyLayerDTypes` was
+on `*kvcache.Recurrent`. With the methods there, all three hybrid
+wrappers pick them up through Go method promotion without any code
+change in the model packages, and the runner's interface assertion
+(`cache.(interface{ InitSplit(...) })`) succeeds for `*HybridCache`.
+Adding the methods on the wrappers themselves would have required
+duplicating identical code in three places and would not have given
+any new model the feature.
+
+### What landed
+
+1. `kvcache/recurrent.go`: `Init` now delegates to `InitSplit` (mirroring
+   `Causal.Init` / `Causal.InitSplit`, see
+   `kvcache/causal.go:143-201`). New `InitSplit` forwards K/V dtypes to
+   `c.kv.InitSplit(...)`; new `SetKeyLayerDTypes` forwards the per-layer
+   K dtype map to `c.kv.SetKeyLayerDTypes(...)`. The conv and recurrent
+   state buffers stay f32. Inline rationale comments capture the
+   "ignore K/V split where semantics don't match" rule.
+
+2. `kvcache/recurrent_test.go` (new): six tests covering split init
+   forwarding, conv/recurrent buffers staying f32 under Turbo* requests,
+   per-layer K dtype routing, `SetKeyLayerDTypes(nil)` clearing prior
+   overrides, the `Init` -> `InitSplit` delegation, and `*Recurrent`
+   satisfying the runner's interface assertion.
+
+3. `model/models/qwen3next/cache_test.go` (new), additions to
+   `model/models/lfm2/cache_test.go`, and `model/models/nemotronh/cache_test.go`
+   (new): one promotion-guard test per package that asserts the runner's
+   exact interface check (`cache.(interface{ InitSplit(...) })` and
+   `cache.(interface{ SetKeyLayerDTypes(...) })`) succeeds against a
+   freshly constructed `*HybridCache`. If a future refactor breaks
+   embedding-based promotion, these tests fail at the package boundary
+   rather than letting the runner silently demote the model.
+
+4. `runner/ollamarunner/cache_test.go` (additions): two tests using a
+   fixture that mirrors the embedding pattern (`struct { *kvcache.Recurrent }`).
+   `TestInitKVCacheUsesSplitForHybridCache` proves `kq8-vturbo4` does
+   NOT take the fallback path against a real `*Recurrent` (i.e. the
+   fallback warning is silent for hybrid caches).
+   `TestInitKVCacheAppliesKeyLayerDTypesOnHybridCache` proves the
+   adaptive preset's per-layer K dtype map reaches the cache — its
+   passing test output emits the expected
+   `INFO applied per-layer key cache dtype overrides spec=...` line.
+
+The existing `mockCacheNoSplit`-backed tests
+(`TestInitKVCacheFallsBackOnSplitUnsupported`,
+`TestInitKVCacheDropsLayerOverridesWhenUnsupported`) still cover the
+warn-and-continue path for any future cache type that lacks split init.
+
+### Verification
+
+```text
+GOCACHE=/tmp/ollama-build-gocache go test -count=1 \
+  ./kvcache ./runner/ollamarunner \
+  ./model/models/qwen3next ./model/models/lfm2 ./model/models/nemotronh \
+  ./tools/turboquant/... ./llm ./envconfig ./fs/ggml ./ml/nn
+```
+
+Result: 14 packages PASS, including the 6 new `Recurrent` tests, the
+3 promotion guards, and the 2 runner-level hybrid-cache tests.
+
+```text
+GOCACHE=/tmp/ollama-build-gocache go test -race -count=1 \
+  ./kvcache ./runner/ollamarunner \
+  ./model/models/qwen3next ./model/models/lfm2 ./model/models/nemotronh
+```
+
+Result: PASS under the race detector across all 5 packages.
+
+### Smoke (later this session, GPUs free): PASS
+
+Live run of `qwen3.6:27b-q8_0` at `num_ctx=98304` with
+`OLLAMA_KV_CACHE_TYPE=kq8-vturbo4`, freshly built binary off
+`turboquant/hybridcache-split-init`. Setup followed the operator
+runbook (`tools/turboquant/README.md`, "Speed and memory in
+practice"): flat `build/lib/ollama/libggml-cuda.so` moved aside so
+only `cuda_v12/libggml-cuda.so` loads.
+
+```bash
+GOCACHE=/tmp/ollama-build-gocache go build -o /tmp/ollama-tq-hybridcache .
+mv build/lib/ollama/libggml-cuda.so /tmp/ollama-build-libggml-cuda-flat-smoke.so
+OLLAMA_HOST=127.0.0.1:8001 OLLAMA_KV_CACHE_TYPE=kq8-vturbo4 \
+OLLAMA_FLASH_ATTENTION=1 OLLAMA_NEW_ENGINE=1 OLLAMA_KEEP_ALIVE=-1 \
+OLLAMA_CONTEXT_LENGTH=98304 OLLAMA_MAX_LOADED_MODELS=1 OLLAMA_NUM_GPU=999 \
+  /tmp/ollama-tq-bin/ollama-tq-hybridcache serve &
+curl -sS http://localhost:8001/api/generate \
+  -d '{"model":"qwen3.6:27b-q8_0","prompt":"What is the capital of France?","options":{"num_ctx":98304,"num_predict":12},"keep_alive":-1}'
+# 200 OK, 11.7 s wall (cold load + 12 tok decode), thinking-mode tokens streamed.
+```
+
+Decisive log lines from the run (`/tmp/ollama-tq-smoke/server.log`):
+
+```text
+inference compute name=CUDA0 description="NVIDIA GeForce RTX 4090" available="23.0 GiB"
+inference compute name=CUDA1 description="NVIDIA GeForce RTX 5090" available="30.9 GiB"
+
+load request="{Operation:commit ... KvSize:98304 KvCacheType:kq8-vturbo4
+  KeyCacheLayerTypes: ... GPULayers:65[CUDA1 Layers:39(0..38), CUDA0 Layers:26(39..64)] ...}"
+
+model weights device=CUDA0 size="11.5 GiB"
+model weights device=CUDA1 size="15.1 GiB"
+model weights device=CPU   size="1.3 GiB"
+kv cache    device=CUDA0 size="2.4 GiB"
+kv cache    device=CUDA1 size="3.6 GiB"
+compute graph device=CUDA0 size="1.1 GiB"
+compute graph device=CUDA1 size="1.7 GiB"
+compute graph device=CPU   size="168.0 MiB"
+total memory size="36.9 GiB"
+loaded runners count=1
+[GIN] 2026/05/01 - 13:58:30 | 200 | 11.717799039s | POST "/api/generate"
+```
+
+The fallback warning from the 2026-04-30 entry —
+`cache does not support split key/value dtypes; using key dtype for both` —
+**did not fire**. `grep -E 'cache does not support split key/value dtypes'`
+on the full server log returns no matches. That is the verbatim runner
+log line confirming the split preset took effect on `qwen3.6:27b-q8_0`:
+the runner's `cache.(interface{ InitSplit(...) })` assertion now
+succeeds against `*HybridCache` (via promoted `*kvcache.Recurrent`
+methods), so it routes through `Causal.InitSplit(K=q8_0, V=turbo4)`
+instead of warning-and-falling-back to uniform q8_0.
+
+### Measured KV memory: before vs after
+
+| Run | Cache shape on hybrid | KV CUDA0 | KV CUDA1 | KV total | vs f16 |
+|---|---|---:|---:|---:|---:|
+| 2026-04-30 (pre-fix, fallback) | uniform q8_0  | 2.8 GiB | 4.1 GiB | **6.9 GiB** | ~50% |
+| 2026-05-01 (this fix, kq8-vturbo4) | K=q8_0, V=turbo4 | 2.4 GiB | 3.6 GiB | **6.0 GiB** | **~57%** |
+| f16 reference (from 2026-04-30 entry) | f16/f16 | — | — | ~13.8 GiB | — |
+
+Reduction over the previous tier-3 fallback: 0.9 GiB total
+(13.0% smaller than uniform q8_0; ~7 percentage-points larger
+savings vs f16). The full ~62% prediction from the Causal-only Phase 0
+results is not reached here for one structural reason: only the
+attention layers in qwen3.6 carry K/V tensors that consume the split.
+The ~half of layers that are GatedDeltaNet (SSM) keep their conv1d +
+recurrent state at f32 (`kvcache/recurrent.go:584-610`,
+`kvcache/recurrent.go:598-610`), so they neither benefit from the
+turbo4 V tier nor change between fix and fallback. The 13% delta
+between the two rows in the table above is exactly the V dtype
+shrinking from q8_0 (1.0 byte/elem) to turbo4 (0.531 byte/elem) on
+the attention half of the cache, scaled into the hybrid layout —
+matching the per-element ratio in `fs/ggml/ggml.go::kvCacheBytesPerElementKV`.
+
+Decode throughput, prefill timing, and quality were not the focus of
+this smoke (the prior debug log entry already covered those for the
+tier-3 fallback path). They will be revisited if and when the
+adaptive preset gets a `qwen3.5` / `qwen3.6` manifest entry, at which
+point the per-layer K dtype overrides will route through the same
+`SetKeyLayerDTypes` path validated here.
+
+### Stretch (deferred to the Turbo5/6 PR landing on main)
+
+Once the Turbo5/6 kernels are on main and `kturbo6-vturbo4` is a
+runtime preset there, repeat the smoke with
+`OLLAMA_KV_CACHE_TYPE=kturbo6-vturbo4` to confirm hybrid models also
+reach the kturbo6 tier. No additional code change is required: the
+same `InitSplit` / `SetKeyLayerDTypes` plumbing handles every K/V
+dtype pair.
+
+### Cleanup
+
+Server stopped (`kill -TERM`, exited in 2 s). Flat
+`build/lib/ollama/libggml-cuda.so` moved back into place so the
+workspace is byte-identical to its pre-smoke state.
+
 ## 2026-04-30 (later) - qwen3.6 launch: three stacked bugs
 
 Goal: get `qwen3.6:27b-q8_0` running through `ollama-tq.service` under

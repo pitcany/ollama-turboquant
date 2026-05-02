@@ -91,6 +91,11 @@ Preset smoke result on 2026-04-30 with `-limit 1`: `mean_nll=1.78801009`, `perpl
 
 ## Operator Guide
 
+> **End users — running models day-to-day:** see
+> [`USAGE.md`](USAGE.md) for a focused install/serve/run runbook
+> with the bundled calibrations table and verification log lines.
+> The sections below cover the design and calibration side.
+
 ### Quick start (the thing most users want)
 
 Set `OLLAMA_KV_CACHE_TYPE=turboquant-adaptive` and run:

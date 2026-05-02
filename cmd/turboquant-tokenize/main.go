@@ -2,11 +2,14 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
 
 	"github.com/ollama/ollama/llama"
+	ollamamodel "github.com/ollama/ollama/model"
+	_ "github.com/ollama/ollama/model/models"
 	tqeval "github.com/ollama/ollama/tools/turboquant/eval"
 )
 
@@ -64,17 +67,7 @@ func run(opts options) error {
 		return err
 	}
 
-	llama.BackendInit()
-	model, err := llama.LoadModelFromFile(modelPath, llama.ModelParams{
-		UseMmap:   true,
-		VocabOnly: true,
-	})
-	if err != nil {
-		return err
-	}
-	defer llama.FreeModel(model)
-
-	tokens, err := model.Tokenize(string(corpus), opts.addSpecial, true)
+	tokens, err := tokenize(modelPath, string(corpus), opts.addSpecial)
 	if err != nil {
 		return err
 	}
@@ -108,6 +101,48 @@ func run(opts options) error {
 
 	fmt.Fprintf(os.Stderr, "wrote %d sequences to %s\n", len(snapshot.Sequences), opts.output)
 	return nil
+}
+
+// tokenize encodes corpus through the active engine's tokenizer. It
+// prefers the Go runtime (model.NewTextProcessor) so it can handle every
+// architecture the runner supports — including new ones like qwen35
+// (qwen3.5/3.6 hybrid Causal+SSM) that the legacy llama.cpp loader does
+// not register. If the Go runtime cannot construct a tokenizer for this
+// GGUF (e.g. the architecture is registered but the model type does not
+// implement tokenizer.Tokenizer), it falls back to the llama.cpp path
+// the previous version of this command used. That preserves the prior
+// success path for older snapshots while unblocking new architectures.
+func tokenize(modelPath, corpus string, addSpecial bool) ([]int, error) {
+	tp, err := ollamamodel.NewTextProcessor(modelPath)
+	if err == nil {
+		ids, err := tp.Encode(corpus, addSpecial)
+		if err != nil {
+			return nil, fmt.Errorf("go-engine tokenize: %w", err)
+		}
+		out := make([]int, len(ids))
+		for i, id := range ids {
+			out[i] = int(id)
+		}
+		return out, nil
+	}
+	if !errors.Is(err, ollamamodel.ErrUnsupportedTokenizer) && !errors.Is(err, ollamamodel.ErrUnsupportedModel) {
+		// A real error from the Go-engine path (corrupt GGUF, missing key,
+		// etc.) — fall back rather than failing, so behaviour matches the
+		// old llama.cpp-only command on the broadest possible set of
+		// inputs.
+		fmt.Fprintf(os.Stderr, "turboquant-tokenize: go-engine tokenizer unavailable (%v); falling back to llama.cpp\n", err)
+	}
+
+	llama.BackendInit()
+	m, err := llama.LoadModelFromFile(modelPath, llama.ModelParams{
+		UseMmap:   true,
+		VocabOnly: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("llama.cpp tokenize: %w", err)
+	}
+	defer llama.FreeModel(m)
+	return m.Tokenize(corpus, addSpecial, true)
 }
 
 func splitTokens(tokens []int, sequenceLen int, maxSequences int) []tqeval.Sequence {

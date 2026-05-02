@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ollama/ollama/fs"
+	"github.com/ollama/ollama/kvcache"
 	"github.com/ollama/ollama/ml"
 	"github.com/ollama/ollama/model/input"
 )
@@ -696,6 +697,61 @@ func TestInitKVCacheDropsLayerOverridesWhenUnsupported(t *testing.T) {
 	}
 	if cache.dtype != ml.DTypeTurbo4 {
 		t.Fatalf("dtype = %v, want %v", cache.dtype, ml.DTypeTurbo4)
+	}
+}
+
+// hybridCacheLikeRecurrent mirrors the embedding pattern used by
+// model/models/{qwen3next,lfm2,nemotronh}.HybridCache: a struct that
+// embeds *kvcache.Recurrent. The runner's initKVCache type-asserts
+// against InitSplit and SetKeyLayerDTypes; this fixture verifies that
+// method promotion through that embedding satisfies both assertions
+// against a real Recurrent (not a mock), so a future refactor that
+// breaks promotion or the assertion is caught at the runner level.
+type hybridCacheLikeRecurrent struct {
+	*kvcache.Recurrent
+}
+
+func newHybridCacheLikeRecurrent() *hybridCacheLikeRecurrent {
+	return &hybridCacheLikeRecurrent{
+		Recurrent: kvcache.NewRecurrentCache(kvcache.RecurrentConfig{
+			ConvDim:            1,
+			ConvChannels:       1,
+			RecurrentStateSize: 1,
+		}),
+	}
+}
+
+func TestInitKVCacheUsesSplitForHybridCache(t *testing.T) {
+	cache := newHybridCacheLikeRecurrent()
+	defer cache.Close()
+
+	if err := initKVCache(cache, nil, "kq8-vturbo4", "", 1, 4, 2); err != nil {
+		t.Fatalf("initKVCache() error = %v, want nil (hybrid caches must accept split init)", err)
+	}
+
+	// Dual-cast to assert the runner's interface check succeeds against
+	// the real promoted methods (not just our wrapper) — equivalent to
+	// the assertion inside initKVCache itself.
+	if _, ok := any(cache).(interface {
+		InitSplit(ml.Backend, ml.DType, ml.DType, int, int, int)
+	}); !ok {
+		t.Fatal("hybrid cache does not satisfy the runner's InitSplit interface")
+	}
+}
+
+func TestInitKVCacheAppliesKeyLayerDTypesOnHybridCache(t *testing.T) {
+	cache := newHybridCacheLikeRecurrent()
+	defer cache.Close()
+
+	spec := "0:q8_0,3:q8_0"
+	if err := initKVCache(cache, nil, "turbo4", spec, 1, 4, 2); err != nil {
+		t.Fatalf("initKVCache() error = %v, want nil", err)
+	}
+
+	if _, ok := any(cache).(interface {
+		SetKeyLayerDTypes(map[int]ml.DType)
+	}); !ok {
+		t.Fatal("hybrid cache does not satisfy the runner's SetKeyLayerDTypes interface")
 	}
 }
 

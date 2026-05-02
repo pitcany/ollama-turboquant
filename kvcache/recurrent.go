@@ -121,8 +121,21 @@ func NewRecurrentCache(config RecurrentConfig) *Recurrent {
 }
 
 func (c *Recurrent) Init(backend ml.Backend, dtype ml.DType, maxSequences, capacity, maxBatch int) {
+	c.InitSplit(backend, dtype, dtype, maxSequences, capacity, maxBatch)
+}
+
+// InitSplit is the split-K/V analog of Init. The embedded Causal sub-cache
+// (c.kv) stores attention K/V tensors and is the only piece that consumes
+// distinct K vs V dtypes; the per-layer conv state and recurrent (SSM)
+// state buffers stay at f32 for numerical stability and ignore the split.
+//
+// This lets hybrid attention+SSM caches (e.g. qwen3next.HybridCache,
+// nemotronh, lfm2) honor split presets such as kq8-vturbo4 and per-layer
+// key-dtype overrides on the attention portion of the cache without
+// disturbing the SSM update.
+func (c *Recurrent) InitSplit(backend ml.Backend, keyDType, valueDType ml.DType, maxSequences, capacity, maxBatch int) {
 	c.backend = backend
-	c.dtype = dtype
+	c.dtype = keyDType
 	c.maxSequences = maxSequences
 	c.checkpoints = make(map[int]*slotCheckpointStore)
 	c.pendingRestore = make(map[int]checkpointRestore)
@@ -141,7 +154,14 @@ func (c *Recurrent) Init(backend ml.Backend, dtype ml.DType, maxSequences, capac
 		c.freeSlots = append(c.freeSlots, i)
 	}
 
-	c.kv.Init(backend, dtype, maxSequences, capacity, maxBatch)
+	c.kv.InitSplit(backend, keyDType, valueDType, maxSequences, capacity, maxBatch)
+}
+
+// SetKeyLayerDTypes forwards per-layer K-cache dtype overrides to the
+// embedded Causal sub-cache. The conv and recurrent state buffers are
+// not keyed/valued in the attention sense and ignore the override.
+func (c *Recurrent) SetKeyLayerDTypes(dtypes map[int]ml.DType) {
+	c.kv.SetKeyLayerDTypes(dtypes)
 }
 
 func (c *Recurrent) Close() {
