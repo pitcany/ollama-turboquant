@@ -1,0 +1,85 @@
+{
+  "version": 1,
+  "created_at": "2026-05-02T15:20:52Z",
+  "model": "qwen3-coder:30b",
+  "snapshot": "/tmp/turboquant-calibration-qwen3moe-q4_k_m/tokens.json",
+  "base_kv_cache_type": "turbo4",
+  "reference_kv_cache_type": "f16",
+  "layer_dtype": "q8_0",
+  "top": 4,
+  "sweep_limit": 4,
+  "validate_limit": 16,
+  "num_ctx": 1024,
+  "batch_size": 512,
+  "num_gpu_layers": 999,
+  "sweep_csv": "/tmp/turboquant-calibration-qwen3moe-q4_k_m-mgpu/layer-sweep.csv",
+  "log_dir": "/tmp/turboquant-calibration-qwen3moe-q4_k_m-mgpu/logs",
+  "key_cache_layer_types": "3:q8_0,8:q8_0,12:q8_0,24:q8_0",
+  "sweep_command": {
+    "name": "bash",
+    "args": [
+      "tools/turboquant/layer_sweep.sh"
+    ],
+    "dir": ".",
+    "env": {
+      "BASE_KV": "turbo4",
+      "BATCH_SIZE": "512",
+      "LAYER_DTYPE": "q8_0",
+      "LIMIT": "4",
+      "LOG_DIR": "/tmp/turboquant-calibration-qwen3moe-q4_k_m-mgpu/logs",
+      "MODEL": "qwen3-coder:30b",
+      "NUM_CTX": "1024",
+      "NUM_GPU_LAYERS": "999",
+      "OUTPUT": "/tmp/turboquant-calibration-qwen3moe-q4_k_m-mgpu/layer-sweep.csv",
+      "REFERENCE_KV": "f16",
+      "SNAPSHOT": "/tmp/turboquant-calibration-qwen3moe-q4_k_m/tokens.json"
+    }
+  },
+  "validation_command": {
+    "name": "go",
+    "args": [
+      "run",
+      "./cmd/turboquant-eval",
+      "-engine",
+      "go",
+      "-model",
+      "qwen3-coder:30b",
+      "-snapshot",
+      "/tmp/turboquant-calibration-qwen3moe-q4_k_m/tokens.json",
+      "-kv-cache-type",
+      "turbo4",
+      "-key-cache-layer-types",
+      "3:q8_0,8:q8_0,12:q8_0,24:q8_0",
+      "-reference-kv-cache-type",
+      "f16",
+      "-num-ctx",
+      "1024",
+      "-batch-size",
+      "512",
+      "-num-gpu-layers",
+      "999",
+      "-flash-attention=true",
+      "-limit",
+      "16",
+      "-format",
+      "json"
+    ],
+    "dir": "."
+  },
+  "validation": {
+    "model": "qwen3-coder:30b",
+    "model_path": "/home/yannik/.ollama/models/blobs/sha256-1194192cf2a187eb02722edcc3f77b11d21f537048ce04b67ccf8ba78863006a",
+    "kv_cache_type": "turbo4",
+    "key_cache_layer_types": "3:q8_0,8:q8_0,12:q8_0,24:q8_0",
+    "reference_kv_cache_type": "f16",
+    "num_sequences": 16,
+    "duration_ms": 89821,
+    "metrics": {
+      "token_count": 16368,
+      "mean_nll": 2.2268616892384294,
+      "perplexity": 9.270725958978801,
+      "kl_token_count": 16368,
+      "mean_kl": 0.05240078362569509
+    }
+  }
+}

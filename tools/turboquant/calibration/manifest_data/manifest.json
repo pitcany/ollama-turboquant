@@ -12,6 +12,16 @@
       "validated": "2026-04-30",
       "phase0_mean_kl": 0.04249074,
       "phase0_perplexity": 8.70012261
+    },
+    {
+      "architecture": "qwen3moe",
+      "file_type": "Q4_K_M",
+      "head_dim": 128,
+      "artifact": "qwen3moe-q4_k_m-adaptive.json",
+      "model_hint": "qwen3-coder:30b",
+      "validated": "2026-05-02",
+      "phase0_mean_kl": 0.05240078362569509,
+      "phase0_perplexity": 9.270725958978801
     }
   ]
 }
