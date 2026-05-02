@@ -1499,3 +1499,201 @@ GOCACHE=/tmp/ollama-build-gocache \
 go test -count=1 ./kvcache ./runner/ollamarunner ./tools/turboquant/...
 ```
 
+
+## 2026-05-01 - Turbo5/Turbo6 kernels + kturbo6-vturbo4 preset (CPU smoke clears abort gate)
+
+Goal: introduce Turbo5 (5-bit, 32 centroids) and Turbo6 (6-bit, 64
+centroids) PolarQuant dtypes plus a `kturbo6-vturbo4` split KV-cache
+preset behind `OLLAMA_TURBOQUANT_K6_PREVIEW`. The community
+`tonbistudio/turboquant-pytorch` V3 measurements showed K6/V4
+generates correctly while K4/V4 garbles, so the operating hypothesis
+is that bumping K bit-width above 4 should rescue the layer-0
+catastrophic failure of all-Turbo4 K. Branch
+`research/turbo5-turbo6-kernels`, plan
+`docs/superpowers/plans/2026-05-01-turbo5-turbo6-kernels.md`.
+
+### Phase A: centroid generation + offline MSE bound
+
+Lloyd-Max generator at `tools/turboquant/centroids/lloyd_max.py`
+(seed=20260501). Reproduces in-tree Turbo2/Turbo3 tables to within
+sampling noise; in-tree CENTROIDS_4BIT does NOT match Lloyd-Max
+for N(0, 1/128) (~5% off on the outermost cell, structurally
+empirical-prior calibrated — documented in
+`tools/turboquant/centroids/README.md`). Generated:
+
+- Turbo5: 32 centroids, mse/bound = 0.941 (target 0.95-1.00)
+- Turbo6: 64 centroids, mse/bound = 0.969 (target 0.95-1.00)
+
+`tools/turboquant/block_error.cpp --assert-bounds` confirms
+synthetic round-trip MSE <= 1.5x the high-rate Gaussian PCM bound
+for Turbo2/3/5/6 (Turbo4 skipped per the documented empirical-table
+discrepancy):
+
+```
+turbo2: mse=4.85e-04, bound=1.33e-03, ratio=0.365
+turbo3: mse=1.38e-04, bound=3.32e-04, ratio=0.415
+turbo4: skipped (in-tree centroids are empirically calibrated)
+turbo5: mse=9.83e-06, bound=2.08e-05, ratio=0.474
+turbo6: mse=2.53e-06, bound=5.19e-06, ratio=0.488
+```
+
+Turbo5/6 ratios sit in the same regime as the proven Turbo2/3
+baselines, indicating the new bit-pack/centroid kernels are quantising
+efficiently.
+
+### Phase B: CPU kernels + traits
+
+CPU `quantize_row_turbo{5,6}_0_ref`, `dequantize_row_turbo{5,6}_0`,
+`quantize_turbo{5,6}_0`, plus `nearest_centroid_{5,6}bit` helpers
+landed in `ml/backend/ggml/ggml/src/ggml-turbo-quant.c`. 5-bit
+indices bit-pack into `qs[80]`, 6-bit into `qs[96]` via a 32-bit
+running accumulator; both clean to zero at end-of-block (640/8 = 80,
+768/8 = 96, no trailing tail byte). Type-traits registration
+mirrors Turbo4 in `ggml.c`, `ggml-cpu/ggml-cpu.c`, and
+`ggml-quants.h`. CPU FA accepts Turbo5/6 K via the existing
+`ggml_get_type_traits_cpu(k->type)->vec_dot` and
+`ggml_get_type_traits(v->type)->to_float` indirections — no
+additional FA arms needed.
+
+### Phase C: CPU-only Phase 0 smoke
+
+`OLLAMA_TURBOQUANT_K6_PREVIEW=1` enables runtime acceptance of
+`kturbo6-vturbo4` via the new envconfig flag. Eval harness preset
+table updated to recognise `kturbo6-vturbo4` (K=Turbo6, V=Turbo4).
+Smoke commands (CPU-only, qwen2.5:7b Q4_K_M, num-ctx=1024):
+
+`-limit 1`:
+
+```bash
+OLLAMA_TURBOQUANT_K6_PREVIEW=1 \
+GOCACHE=/tmp/ollama-build-gocache \
+OLLAMA_LIBRARY_PATH=/home/yannik/Work/ollama-build/build/lib/ollama \
+go run ./cmd/turboquant-eval \
+  -model qwen2.5:7b \
+  -snapshot tools/turboquant/testdata/qwen25_7b_phase0_tokens.json \
+  -engine go -num-ctx 1024 -batch-size 512 -num-gpu-layers 0 \
+  -flash-attention=true -reference-kv-cache-type f16 \
+  -kv-cache-preset kturbo6-vturbo4 \
+  -limit 1 -format json
+```
+
+Result: `mean_nll=1.7796800576864815, perplexity=5.92795951007658,
+mean_kl=0.011913811220409588, duration=37.4s`.
+
+`-limit 16` (same flags, `-limit 16`):
+
+Result: `mean_nll=1.9687253548449997, perplexity=7.161542243000171,
+mean_kl=0.016512241471573503, duration=514.1s`.
+
+### Decision: PROCEED to Phase D (CUDA)
+
+Both CPU smoke results clear the spec abort criterion (`mean_kl <
+0.5`) by ~30x and even clear the Phase 0 success criterion
+(`mean_kl < 0.02`). For comparison the production `kq8-vturbo4`
+preset is `mean_kl=0.0171` on the full 256-sequence Phase 0 run.
+At 1.31 B per K/V pair, `kturbo6-vturbo4` is ~14% smaller than
+`kq8-vturbo4` (1.53 B/pair) while at parity or slightly better on
+KL — strictly Pareto-better on the limited-sample evidence.
+
+Conclusion: the Turbo6 K representation does NOT garble layer 0 the
+way all-Turbo4 K does. The bit-count hypothesis (community
+tonbistudio observation) is supported. The residual representation
+is NOT the fundamental bottleneck for K accuracy; bit-count was.
+Phase D (CUDA kernels) is justified — without CUDA the preset is
+operator-impractical.
+
+## 2026-05-01 - kturbo6-vturbo4 full Phase 0 cleared, preview gate removed
+
+Goal: full 256-sequence Phase 0 promotion gate for the new
+`kturbo6-vturbo4` preset on `qwen2.5:7b` Q4_K_M.
+
+Command (mixed CPU+GPU, 20 of 29 layers offloaded to GPU 1 because
+the RTX 5090 had only 8.5 GB free under the existing VLLM workload):
+
+```bash
+CUDA_VISIBLE_DEVICES=1 \
+OLLAMA_TURBOQUANT_K6_PREVIEW=1 \
+GOCACHE=/tmp/ollama-build-gocache \
+OLLAMA_LIBRARY_PATH=/home/yannik/Work/ollama-build/build/lib/ollama \
+LD_LIBRARY_PATH=/home/yannik/Work/ollama-build/build/lib/ollama/cuda_v12:/home/yannik/Work/ollama-build/build/lib/ollama \
+go run ./cmd/turboquant-eval \
+  -model qwen2.5:7b \
+  -snapshot tools/turboquant/testdata/qwen25_7b_phase0_tokens.json \
+  -engine go -num-ctx 1024 -batch-size 512 -num-gpu-layers 20 \
+  -flash-attention=true -reference-kv-cache-type f16 \
+  -kv-cache-preset kturbo6-vturbo4 \
+  -format json
+```
+
+Result:
+
+```
+num_sequences=256, token_count=261888,
+mean_nll=2.144526462226762,
+perplexity=8.537997215681742,
+mean_kl=0.012724557428679966,
+duration=1725.1s
+```
+
+### Comparison to other promoted presets
+
+| cache | mean_nll | perplexity | mean_kl | bytes/pair |
+|---|---:|---:|---:|---:|
+| llama f16 | 2.14184 | 8.51509 | -        | 4.000 |
+| kq8-vturbo4 | 2.15086 | 8.59224 | 0.01706 | 1.531 |
+| **kturbo6-vturbo4** | **2.14453** | **8.53800** | **0.01272** | **1.312** |
+
+`kturbo6-vturbo4` strictly Pareto-dominates `kq8-vturbo4` on every
+quality metric AND uses 14% less memory per K/V pair. Mean NLL gap
+to f16 reference is 0.003 — essentially indistinguishable. The
+~25% lower mean KL vs `kq8-vturbo4` is the headline number.
+
+### Decision: PROMOTE — drop the OLLAMA_TURBOQUANT_K6_PREVIEW gate
+
+Phase 0 success criterion was `mean_kl < 0.02`. We landed at 0.01272,
+under by 36%. Stretch goal "match or beat kq8-vturbo4 at strictly
+lower memory" is also achieved.
+
+Per the plan abort/promote contract, the preview flag comes off
+once Phase 0 clears. Removed:
+
+- `envconfig.TurboquantK6Preview` variable and the
+  `OLLAMA_TURBOQUANT_K6_PREVIEW` entry in `AsMap()`.
+- The two runtime gates in `llm/server.go` that warned and cleared
+  `loadRequest.KvCacheType` when the flag was unset (one for the
+  legacy llama runner, one for the Ollama-engine flash-attention
+  path).
+- The `TestTurboquantK6PreviewGate` test in `llm/server_test.go`
+  and the now-unused `envconfig` import.
+
+`kturbo6-vturbo4` is now operator-accessible via
+`OLLAMA_KV_CACHE_TYPE=kturbo6-vturbo4` with no extra env var
+required, matching the existing `kq8-vturbo4` UX.
+
+### Hardware caveat
+
+Full-GPU offload (29/29 layers) OOMed on the 5090 because of an
+existing VLLM workload occupying 23 GB. The 20-layer offload run
+makes the recorded duration (1725.1s) not directly comparable to
+the existing `kq8-vturbo4` (1123.3s) and adaptive (1159.0s) rows,
+which used full GPU on a free RTX 4090. A same-config rerun on a
+free GPU is a clean follow-up but does not affect the quality
+promotion decision.
+
+### Out-of-scope follow-ups
+
+- Same-config Phase 0 rerun on a free GPU for fair duration
+  comparison.
+- Vectorised CUDA KQ inner-product for Turbo5/6 (current
+  implementation is per-element decode; the bulk 32-bit-fetch path
+  used by Turbo4 doesn't apply because 5/6-bit indices don't
+  byte-align). A follow-up could implement a 64-bit-fetch path
+  that decodes ~10 elements per fetch, modulo bit-extract
+  bookkeeping.
+- InnerQ per-channel equalisation for Turbo5/6 set-rows. CPU smoke
+  cleared the gate without it; CUDA pre-promotion gate cleared it
+  too. Adding it could improve quality further on heavily skewed
+  channel distributions.
+- Metal kernels. Turbo5/6 are CPU + CUDA only this PR.
+- Per-layer adaptive integration (Turbo5/Turbo6 entries in the
+  calibration manifest).

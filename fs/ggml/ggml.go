@@ -877,11 +877,15 @@ func (f GGML) SupportsKVCacheType(cacheType string) bool {
 		return f.SupportsKVCacheType("q8_0") && f.SupportsKVCacheType("turbo4")
 	}
 
+	if cacheType == "kturbo6-vturbo4" {
+		return f.SupportsKVCacheType("turbo6") && f.SupportsKVCacheType("turbo4")
+	}
+
 	if slices.Contains([]string{"q8_0", "q4_0"}, cacheType) {
 		return true
 	}
 
-	if slices.Contains([]string{"turbo2", "turbo3", "turbo4"}, cacheType) {
+	if slices.Contains([]string{"turbo2", "turbo3", "turbo4", "turbo5", "turbo6"}, cacheType) {
 		headDim := f.KV().EmbeddingHeadCountK()
 		if headDim == 0 {
 			return false
@@ -956,6 +960,10 @@ func kvCacheBytesPerElement(cacheType string) float64 {
 		return 50.0 / 128.0 // 0.391 bytes/element (3-bit PolarQuant)
 	case "turbo4":
 		return 68.0 / 128.0 // 0.531 bytes/element (4-bit PolarQuant)
+	case "turbo5":
+		return 84.0 / 128.0 // 0.656 bytes/element (5-bit PolarQuant: 80B qs + 4B norm/rnorm per 128 elems)
+	case "turbo6":
+		return 100.0 / 128.0 // 0.781 bytes/element (6-bit PolarQuant: 96B qs + 4B norm/rnorm per 128 elems)
 	case "f32":
 		return 4 // f32 (default for recurrent)
 	default:
@@ -967,6 +975,8 @@ func kvCacheBytesPerElementKV(cacheType string) (float64, float64) {
 	switch cacheType {
 	case "kq8-vturbo4":
 		return kvCacheBytesPerElement("q8_0"), kvCacheBytesPerElement("turbo4")
+	case "kturbo6-vturbo4":
+		return kvCacheBytesPerElement("turbo6"), kvCacheBytesPerElement("turbo4")
 	default:
 		bytesPerElement := kvCacheBytesPerElement(cacheType)
 		return bytesPerElement, bytesPerElement

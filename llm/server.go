@@ -276,9 +276,9 @@ func NewLlamaServer(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, modelPath st
 				kvct = resolved
 			}
 
-			// Flash Attention also supports kv cache quantization
-			// Enable if the requested and kv cache type is supported by the model
 			if f.SupportsKVCacheType(kvct) {
+				// Flash Attention also supports kv cache quantization
+				// Enable if the requested and kv cache type is supported by the model
 				loadRequest.KvCacheType = kvct
 			} else {
 				slog.Warn("kv cache type not supported by model", "type", kvct)
@@ -362,7 +362,11 @@ func NewLlamaServer(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, modelPath st
 }
 
 func isSplitKVCachePreset(cacheType string) bool {
-	return cacheType == "kq8-vturbo4"
+	switch cacheType {
+	case "kq8-vturbo4", "kturbo6-vturbo4":
+		return true
+	}
+	return false
 }
 
 func isEmbeddingModel(kv ggml.KV) bool {

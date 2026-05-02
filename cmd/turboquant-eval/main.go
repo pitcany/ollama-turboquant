@@ -538,10 +538,14 @@ func goBackendParams(modelPath string, opts options) (ml.BackendParams, error) {
 	return params, nil
 }
 
-const kvCachePresetKQ8VTurbo4 = "kq8-vturbo4"
+const (
+	kvCachePresetKQ8VTurbo4    = "kq8-vturbo4"
+	kvCachePresetKTurbo6VTurbo4 = "kturbo6-vturbo4"
+)
 
 var kvCachePresetTypes = map[string][2]string{
-	kvCachePresetKQ8VTurbo4: {"q8_0", "turbo4"},
+	kvCachePresetKQ8VTurbo4:     {"q8_0", "turbo4"},
+	kvCachePresetKTurbo6VTurbo4: {"turbo6", "turbo4"},
 }
 
 func goKVCacheTypes(opts options) (string, string, error) {

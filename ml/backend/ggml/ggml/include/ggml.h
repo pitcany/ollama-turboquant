@@ -422,7 +422,9 @@ extern "C" {
         GGML_TYPE_TURBO3_0 = 37, // TurboQuant 3-bit KV cache (reusing deprecated IQ4_NL_4_8 slot)
         GGML_TYPE_TURBO4_0 = 38, // TurboQuant 4-bit KV cache (reusing deprecated IQ4_NL_8_8 slot)
         GGML_TYPE_MXFP4   = 39, // MXFP4 (1 block)
-        GGML_TYPE_COUNT   = 40,
+        GGML_TYPE_TURBO5_0 = 40, // TurboQuant 5-bit KV cache
+        GGML_TYPE_TURBO6_0 = 41, // TurboQuant 6-bit KV cache
+        GGML_TYPE_COUNT   = 42,
     };
 
     // precision

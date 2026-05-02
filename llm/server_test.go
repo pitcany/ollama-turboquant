@@ -21,6 +21,9 @@ func TestIsSplitKVCachePreset(t *testing.T) {
 	if !isSplitKVCachePreset("kq8-vturbo4") {
 		t.Fatal("expected kq8-vturbo4 to be treated as a split KV cache preset")
 	}
+	if !isSplitKVCachePreset("kturbo6-vturbo4") {
+		t.Fatal("expected kturbo6-vturbo4 to be treated as a split KV cache preset")
+	}
 	if isSplitKVCachePreset("turbo4") {
 		t.Fatal("did not expect turbo4 to be treated as a split KV cache preset")
 	}
@@ -56,6 +59,10 @@ func TestApplyEmbeddingTurboquantFallback(t *testing.T) {
 		{
 			name:        "split preset env ignored",
 			kvCacheType: "kq8-vturbo4",
+		},
+		{
+			name:        "k6 split preset env ignored",
+			kvCacheType: "kturbo6-vturbo4",
 		},
 		{
 			name:        "adaptive sentinel env ignored",

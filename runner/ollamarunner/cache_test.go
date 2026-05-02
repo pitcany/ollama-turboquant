@@ -558,6 +558,8 @@ func TestKVCacheTypesFromStr(t *testing.T) {
 		{name: "shared turbo", in: "turbo4", wantK: ml.DTypeTurbo4, wantV: ml.DTypeTurbo4},
 		{name: "safe split preset", in: "kq8-vturbo4", wantK: ml.DTypeQ80, wantV: ml.DTypeTurbo4},
 		{name: "case insensitive split preset", in: "KQ8-VTURBO4", wantK: ml.DTypeQ80, wantV: ml.DTypeTurbo4},
+		{name: "k6 split preset", in: "kturbo6-vturbo4", wantK: ml.DTypeTurbo6, wantV: ml.DTypeTurbo4},
+		{name: "k6 case insensitive", in: "KTURBO6-VTURBO4", wantK: ml.DTypeTurbo6, wantV: ml.DTypeTurbo4},
 	}
 
 	for _, tt := range tests {
@@ -583,6 +585,22 @@ func TestInitKVCacheUsesSplitPreset(t *testing.T) {
 	}
 	if cache.keyDType != ml.DTypeQ80 || cache.valueDType != ml.DTypeTurbo4 {
 		t.Fatalf("dtypes = (%v, %v), want (%v, %v)", cache.keyDType, cache.valueDType, ml.DTypeQ80, ml.DTypeTurbo4)
+	}
+}
+
+func TestInitKVCacheUsesK6SplitPreset(t *testing.T) {
+	cache := &mockCache{}
+	if err := initKVCache(cache, nil, "kturbo6-vturbo4", "", 2, 8, 4); err != nil {
+		t.Fatalf("initKVCache() error = %v", err)
+	}
+	if cache.initCalled {
+		t.Fatal("Init() was called for split preset")
+	}
+	if !cache.initSplitCalled {
+		t.Fatal("InitSplit() was not called for split preset")
+	}
+	if cache.keyDType != ml.DTypeTurbo6 || cache.valueDType != ml.DTypeTurbo4 {
+		t.Fatalf("dtypes = (%v, %v), want (%v, %v)", cache.keyDType, cache.valueDType, ml.DTypeTurbo6, ml.DTypeTurbo4)
 	}
 }
 

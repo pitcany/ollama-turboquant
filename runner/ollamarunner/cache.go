@@ -124,8 +124,11 @@ func initKVCache(cache kvcache.Cache, backend ml.Backend, kvCacheType, keyCacheL
 }
 
 func kvCacheTypesFromStr(s string) (ml.DType, ml.DType) {
-	if strings.EqualFold(s, "kq8-vturbo4") {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "kq8-vturbo4":
 		return ml.DTypeQ80, ml.DTypeTurbo4
+	case "kturbo6-vturbo4":
+		return ml.DTypeTurbo6, ml.DTypeTurbo4
 	}
 	dtype := kvCacheTypeFromStr(s)
 	return dtype, dtype
@@ -171,7 +174,7 @@ func hasTurboDtype(kvCacheType, layerSpec string) bool {
 	if isTurboDtypeName(kvCacheType) {
 		return true
 	}
-	if strings.EqualFold(kvCacheType, "kq8-vturbo4") {
+	if strings.EqualFold(kvCacheType, "kq8-vturbo4") || strings.EqualFold(kvCacheType, "kturbo6-vturbo4") {
 		return true
 	}
 	overrides, err := calibration.ParseKeyLayerOverrides(layerSpec)
@@ -188,7 +191,7 @@ func hasTurboDtype(kvCacheType, layerSpec string) bool {
 
 func isTurboDtypeName(s string) bool {
 	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "turbo2", "turbo3", "turbo4":
+	case "turbo2", "turbo3", "turbo4", "turbo5", "turbo6":
 		return true
 	default:
 		return false
@@ -197,9 +200,9 @@ func isTurboDtypeName(s string) bool {
 
 func rewriteTurboCacheType(s string) string {
 	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "turbo2", "turbo3", "turbo4":
+	case "turbo2", "turbo3", "turbo4", "turbo5", "turbo6":
 		return "q8_0"
-	case "kq8-vturbo4":
+	case "kq8-vturbo4", "kturbo6-vturbo4":
 		// Both halves of the split lose Turbo, collapse to uniform q8_0.
 		return "q8_0"
 	default:
@@ -235,6 +238,10 @@ func kvCacheTypeFromStr(s string) ml.DType {
 		return ml.DTypeTurbo3
 	case "turbo4":
 		return ml.DTypeTurbo4
+	case "turbo5":
+		return ml.DTypeTurbo5
+	case "turbo6":
+		return ml.DTypeTurbo6
 	default:
 		return ml.DTypeF16
 	}
