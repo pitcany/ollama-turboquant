@@ -782,6 +782,7 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_turbo5(
             const int base = k0 + (nthreads == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads)*cpy_ne;
             const int elem0 = base * 2;
             const int blk   = elem0 / QK_TURBO5;
+            const int elem0_in_blk = elem0 % QK_TURBO5;
 
             if (blk != prev_blk) {
                 norm = __half2float(K_blk[blk].norm);
@@ -790,7 +791,7 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_turbo5(
 
 #pragma unroll
             for (int k1 = 0; k1 < cpy_ne; ++k1) {
-                const int elem = elem0 + k1 * 2;
+                const int elem = elem0_in_blk + k1 * 2;
                 const float v0 = turbo5_dequant_element(&K_blk[blk], elem, norm);
                 const float v1 = turbo5_dequant_element(&K_blk[blk], elem + 1, norm);
 #ifdef V_DOT2_F32_F16_AVAILABLE
@@ -823,50 +824,78 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_turbo6(
     constexpr int cpy_nb = ggml_cuda_get_max_cpy_bytes();
     constexpr int cpy_ne = cpy_nb / 4;
 
-    // Centroids in registers. Turbo6 uses 64 floats = 256 bytes register
-    // pressure; on Ampere/Ada this is acceptable for this kernel's
-    // occupancy (FA-vec already has a high register budget).
-    float ct[64];
-#pragma unroll
-    for (int i = 0; i < 64; ++i) ct[i] = TURBO_CENTROIDS_6BIT[i];
-
     float sum = 0.0f;
     int prev_blk = -1;
     float norm = 0.0f;
 
+    if constexpr (cpy_ne == 4) {
+        // Centroids in registers. Turbo6 uses 64 floats = 256 bytes register
+        // pressure; on Ampere/Ada this is acceptable for this kernel's
+        // occupancy (FA-vec already has a high register budget).
+        float ct[64];
 #pragma unroll
-    for (int k0 = 0; k0 < D/2; k0 += nthreads*cpy_ne) {
-        const int base = k0 + (nthreads == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads)*cpy_ne;
-        const int elem0 = base * 2;
-        const int blk   = elem0 / QK_TURBO6;
-        const int qs_byte = (elem0 % QK_TURBO6) * 6 / 8;
-
-        if (blk != prev_blk) {
-            norm = __half2float(K_blk[blk].norm);
-            prev_blk = blk;
-        }
-
-        // Fetch 6 bytes = 48 bits = 8 6-bit indices into a uint64_t.
-        // qs[96] guarantees safety: max qs_byte is 90, so qs[90..95] is in-bounds.
-        uint32_t lo;
-        uint16_t hi;
-        memcpy(&lo, &K_blk[blk].qs[qs_byte],     sizeof(uint32_t));
-        memcpy(&hi, &K_blk[blk].qs[qs_byte + 4], sizeof(uint16_t));
-        const uint64_t packed = (uint64_t)lo | ((uint64_t)hi << 32);
+        for (int i = 0; i < 64; ++i) ct[i] = TURBO_CENTROIDS_6BIT[i];
 
 #pragma unroll
-        for (int k1 = 0; k1 < cpy_ne; ++k1) {
-            const uint32_t shift = k1 * 12;  // 6 bits x 2 elems per pair
-            const uint8_t i0 = (uint8_t)((packed >> shift)        & 0x3F);
-            const uint8_t i1 = (uint8_t)((packed >> (shift + 6))  & 0x3F);
-            const float v0 = ct[i0] * norm;
-            const float v1 = ct[i1] * norm;
+        for (int k0 = 0; k0 < D/2; k0 += nthreads*cpy_ne) {
+            const int base = k0 + (nthreads == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads)*cpy_ne;
+            const int elem0 = base * 2;
+            const int blk   = elem0 / QK_TURBO6;
+            const int qs_byte = (elem0 % QK_TURBO6) * 6 / 8;
+
+            if (blk != prev_blk) {
+                norm = __half2float(K_blk[blk].norm);
+                prev_blk = blk;
+            }
+
+            // Fetch 6 bytes = 48 bits = 8 6-bit indices into a uint64_t.
+            // qs[96] guarantees safety: max qs_byte is 90, so qs[90..95] is in-bounds.
+            uint32_t lo;
+            uint16_t hi;
+            memcpy(&lo, &K_blk[blk].qs[qs_byte],     sizeof(uint32_t));
+            memcpy(&hi, &K_blk[blk].qs[qs_byte + 4], sizeof(uint16_t));
+            const uint64_t packed = (uint64_t)lo | ((uint64_t)hi << 32);
+
+#pragma unroll
+            for (int k1 = 0; k1 < cpy_ne; ++k1) {
+                const uint32_t shift = k1 * 12;  // 6 bits x 2 elems per pair
+                const uint8_t i0 = (uint8_t)((packed >> shift)        & 0x3F);
+                const uint8_t i1 = (uint8_t)((packed >> (shift + 6))  & 0x3F);
+                const float v0 = ct[i0] * norm;
+                const float v1 = ct[i1] * norm;
 #ifdef V_DOT2_F32_F16_AVAILABLE
-            const float2 Q_val = __half22float2(((const half2 *) Q_v)[k0/nthreads + k1]);
+                const float2 Q_val = __half22float2(((const half2 *) Q_v)[k0/nthreads + k1]);
 #else
-            const float2 Q_val = ((const float2 *) Q_v)[k0/nthreads + k1];
+                const float2 Q_val = ((const float2 *) Q_v)[k0/nthreads + k1];
 #endif
-            sum += v0 * Q_val.x + v1 * Q_val.y;
+                sum += v0 * Q_val.x + v1 * Q_val.y;
+            }
+        }
+    } else {
+#pragma unroll
+        for (int k0 = 0; k0 < D/2; k0 += nthreads*cpy_ne) {
+            const int base = k0 + (nthreads == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads)*cpy_ne;
+            const int elem0 = base * 2;
+            const int blk   = elem0 / QK_TURBO6;
+            const int elem0_in_blk = elem0 % QK_TURBO6;
+
+            if (blk != prev_blk) {
+                norm = __half2float(K_blk[blk].norm);
+                prev_blk = blk;
+            }
+
+#pragma unroll
+            for (int k1 = 0; k1 < cpy_ne; ++k1) {
+                const int elem = elem0_in_blk + k1 * 2;
+                const float v0 = turbo6_dequant_element(&K_blk[blk], elem, norm);
+                const float v1 = turbo6_dequant_element(&K_blk[blk], elem + 1, norm);
+#ifdef V_DOT2_F32_F16_AVAILABLE
+                const float2 Q_val = __half22float2(((const half2 *) Q_v)[k0/nthreads + k1]);
+#else
+                const float2 Q_val = ((const float2 *) Q_v)[k0/nthreads + k1];
+#endif
+                sum += v0 * Q_val.x + v1 * Q_val.y;
+            }
         }
     }
 
