@@ -53,7 +53,7 @@
 #   -G  num-gpu-layers for calibrate                                  (default 999)
 #   -o  artifact basename under manifest_data/, default
 #       <arch>-<lower-file-type>-adaptive.json
-#   -h  validated date stamp (default today, ISO YYYY-MM-DD)
+#   -D  validated date stamp (default today, ISO YYYY-MM-DD)
 #   -W  artifact work dir for sweep CSV + logs
 #       (default /tmp/turboquant-calibration-<arch>-<file-type>)
 #   -P  validated phase ("validated" stamp model-hint), defaults to -m
@@ -122,12 +122,12 @@ while [[ $# -gt 0 ]]; do
     -B) BATCH_SIZE="$2"; shift 2 ;;
     -G) NUM_GPU_LAYERS="$2"; shift 2 ;;
     -o) ARTIFACT_BASENAME="$2"; shift 2 ;;
-    -h) VALIDATED_DATE="$2"; shift 2 ;;
+    -D) VALIDATED_DATE="$2"; shift 2 ;;
     -W) WORK_DIR="$2"; shift 2 ;;
     -P) MODEL_HINT="$2"; shift 2 ;;
     --no-bundle) SKIP_BUNDLE=1; shift ;;
     --no-loader-test) SKIP_LOADER_TEST=1; shift ;;
-    --help|-?) usage ;;
+    --help|-h|-?) usage ;;
     *) echo "error: unknown flag: $1" >&2; usage ;;
   esac
 done
