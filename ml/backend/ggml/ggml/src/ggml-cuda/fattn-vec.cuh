@@ -81,7 +81,8 @@ static __global__ void flash_attn_ext_vec(
         type_K == GGML_TYPE_TURBO2_0 || type_K == GGML_TYPE_TURBO3_0 || type_K == GGML_TYPE_TURBO4_0 ||
         type_K == GGML_TYPE_TURBO5_0 || type_K == GGML_TYPE_TURBO6_0;
     constexpr bool V_is_unquantized = type_V == GGML_TYPE_F16 ||
-        type_V == GGML_TYPE_TURBO2_0 || type_V == GGML_TYPE_TURBO3_0 || type_V == GGML_TYPE_TURBO4_0;
+        type_V == GGML_TYPE_TURBO2_0 || type_V == GGML_TYPE_TURBO3_0 || type_V == GGML_TYPE_TURBO4_0 ||
+        type_V == GGML_TYPE_TURBO5_0 || type_V == GGML_TYPE_TURBO6_0;
 
     constexpr int nthreads_KQ = K_is_unquantized ? 128 / cpy_nb : nthreads_KQ_q;
     constexpr int nthreads_V  = V_is_unquantized ? 128 / cpy_nb : nthreads_V_q;
