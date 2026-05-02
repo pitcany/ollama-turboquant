@@ -3,6 +3,152 @@
 Purpose: rigorous, evidence-first log per `TURBOQUANT-CLAUDE-HANDOFF.md`.
 No speculative patches. Each fix must cite the first proven mismatch it explains.
 
+## 2026-05-02 - qwen3-coder:30b adaptive calibration; qwen3.6 tokenizer blocked
+
+Goal: produce bundled `turboquant-adaptive` calibrations for the two
+local hybrid/MoE candidates `qwen3-coder:30b` and `qwen3.6:27b-q8_0`.
+Result: `qwen3-coder` shipped, `qwen3.6` blocked behind a tokenizer-side
+limitation in `cmd/turboquant-tokenize`.
+
+### Multi-GPU split for cmd/turboquant-eval
+
+First attempt failed. `cmd/turboquant-eval/main.go::goBackendParams` put
+every layer on `memory.GPUs[0]` regardless of how many GPUs were
+visible. For models past ~16 GiB this OOM'd at the single weight
+buffer alloc:
+
+```text
+ggml_backend_cuda_buffer_type_alloc_buffer: allocating 17524.43 MiB
+  on device 0: cudaMalloc failed: out of memory
+panic: insufficient memory
+```
+
+Failed even on a 32 GiB 5090 with 32 GiB free — VMM cannot satisfy a
+17 GiB single contiguous allocation under driver fragmentation. The
+production runner avoids this by splitting layers across every visible
+device (see the `load_request: GPULayers:65[CUDA1 Layers:39(0..38),
+CUDA0 Layers:26(39..64)]` line in `runner/ollamarunner/cache.go`).
+Ported the same idea: contiguously distribute `gpuLayerCount` layers
+across all `len(memory.GPUs)` devices using `base + extra` layout.
+KL eval is insensitive to which device owns each layer, so an equal
+split is sufficient.
+
+### Library-path env-var pinning in the calibrate driver
+
+Second failure. `scripts/turboquant-calibrate.sh` forks
+`cmd/turboquant-calibrate`, which forks `cmd/turboquant-eval` as a
+subprocess. The eval subprocess looks beside its temp `go run` binary
+in `/tmp/go-build*/`, finds no `../lib/ollama`, and silently falls
+back to a CPU-only backend (`load_backend: loaded CPU backend from
+.../libggml-cpu-icelake.so`, no CUDA). A 28-layer sweep that should
+take ~3 minutes on GPU stretched to ~3 hours on CPU and produced no
+artifact (validation step ran out of patience and the calibrate tool
+caught a parser failure when no successful layer rows existed).
+
+Fixed by exporting `OLLAMA_LIBRARY_PATH=$ROOT/build/lib/ollama:$ROOT/build/lib/ollama/cuda_v12`
+before the calibrate step. Both directories are pinned: the flat
+`libggml-cuda.so` for in-process eval (matches the operator runbook in
+`tools/turboquant/README.md` "Speed and memory in practice"), and
+`cuda_v12/libggml-cuda.so` for the FA-vec kernels.
+
+### qwen3-coder:30b calibration: SHIPPED
+
+After both fixes, the calibration ran cleanly on both GPUs (4090 + 5090,
+multi-GPU split). Selected layers (top-4 lowest-KL): **3, 8, 12, 24**.
+Validation across 16 sequences (the new `-V 16` default for 30B-class
+models per the script's documentation):
+
+| metric        | value                       |
+|---------------|----------------------------|
+| `mean_nll`    | 2.2268616892384294          |
+| `perplexity`  | 9.270725958978801           |
+| `mean_kl`     | 0.05240078362569509         |
+| budget        | 0.13 (adaptive Phase 0)     |
+| headroom      | ~2.5x under budget          |
+
+Bundled into `tools/turboquant/calibration/manifest_data/qwen3moe-q4_k_m-adaptive.json`
+and registered against `(architecture=qwen3moe, file_type=Q4_K_M, head_dim=128)`.
+
+End-to-end smoke against the runtime confirms resolution and apply:
+
+```text
+turboquant-adaptive resolved cache_type=turbo4
+  manifest_source=manifest:qwen3moe-q4_k_m-adaptive.json
+kv cache device=CUDA1 size="212.5 MiB"
+loaded runners count=1
+[GIN] POST /api/generate -> 200 OK in 7.02s
+```
+
+KV at `num_ctx=8192`: **212.5 MiB**. Compared to the kq8-vturbo4 floor
+(~580 MiB at the same context, projected from per-element ratios in
+`fs/ggml/ggml.go::kvCacheBytesPerElementKV`), adaptive saves an extra
+~24% — and per the stricter `kq8-vturbo4` Phase 0 budget (`mean_kl ≤
+0.05`), this calibration is just over (0.0524). Operators wanting the
+strict floor should set `OLLAMA_KV_CACHE_TYPE=kq8-vturbo4`; the
+adaptive entry trades ~5% extra KL for an additional ~24% memory.
+
+### qwen3.6:27b-q8_0 calibration: BLOCKED
+
+`cmd/turboquant-tokenize` is built on the legacy llama.cpp loader,
+not the Go runtime. The qwen3.6 GGUF identifies as
+`general.architecture=qwen35`:
+
+```text
+llama_model_load: error loading model: error loading model
+  architecture: unknown model architecture: 'qwen35'
+turboquant-tokenize: unable to load model
+```
+
+The Go runtime registered `qwen35` (this is the same path the runner
+uses for the HybridCache split-init smoke earlier on this branch),
+but the calibrate snapshot pipeline does not use that runtime — it
+hands the tokenizer step to llama.cpp. There are three ways forward,
+none small enough to land in the same session as the qwen3-coder
+ship:
+
+1. **Port `turboquant-tokenize` to the Go engine.** Cleanest. About a
+   ~150-line change: swap the `llama_model_load_from_file_impl` path
+   for `model.New(...).Tokenize(...)` and serialise to the existing
+   snapshot JSON shape that `cmd/turboquant-eval` consumes. Future
+   architectures land for free.
+2. **External tokenization via the running runtime.** Use the Go
+   server's tokenizer to encode the corpus, write the JSON snapshot
+   manually. Stopgap only — it bypasses the calibrate pipeline's
+   sequence-len + max-sequences enforcement.
+3. **Backport the `qwen35` registration into llama.cpp.** Requires a
+   submodule bump and matches whatever the upstream llama.cpp project
+   does about hybrid-attention models. Largest blast radius; least
+   recommended.
+
+Until any of these lands, `qwen3.6:27b-q8_0` continues to use
+`OLLAMA_KV_CACHE_TYPE=kq8-vturbo4` (the safe tier-1 preset) which the
+HybridCache split-init smoke earlier on this branch already validated:
+6.0 GiB total KV at `num_ctx=98304`, ~57% savings vs f16. Adding a
+qwen35 manifest entry would buy maybe another 0.6-1.0 GiB on top, so
+the operational gap is small.
+
+### Files changed
+
+- `cmd/turboquant-eval/main.go` — multi-GPU layer split.
+- `scripts/turboquant-calibrate.sh` — `OLLAMA_LIBRARY_PATH` pin and
+  the operator-side `-V 16` default + `-S` (reuse sweep CSV) flag.
+- `tools/turboquant/calibration/manifest_data/qwen3moe-q4_k_m-adaptive.json`
+  — new bundled calibration.
+- `tools/turboquant/calibration/manifest_data/manifest.json` — new
+  entry for `qwen3moe / Q4_K_M / head_dim=128`.
+
+### Verification
+
+```bash
+GOCACHE=/tmp/ollama-build-gocache go test -count=1 \
+  ./tools/turboquant/calibration/...
+```
+
+Loader test passes against the new manifest. End-to-end smoke against
+qwen3-coder:30b reported above. Multi-GPU split exercised successfully
+during the calibration sweep itself (28 layers × ~5s = ~3 min on
+4090+5090 vs failure-with-OOM on a single GPU).
+
 ## 2026-05-01 - HybridCache split init: lift qwen3.5/3.6/lfm2/nemotronh to tier 1/2
 
 Goal: Close the open item from the 2026-04-30 "qwen3.6 launch: three
