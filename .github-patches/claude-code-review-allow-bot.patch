@@ -1,0 +1,27 @@
+From: Claude
+Subject: [PATCH] ci(claude-review): allow claude[bot] as triggering actor
+
+Pushes by claude[bot] on a PR fire the pull_request: synchronize event,
+which re-runs anthropics/claude-code-action@v1. Because allowed_bots
+defaults to "" (no bots permitted), the action fails with:
+
+  Workflow initiated by non-human actor: claude (type: Bot).
+  Add bot to allowed_bots list or use '*' to allow all bots.
+
+Allow only claude[bot] (not all bots) so re-runs caused by Claude's
+own commits succeed without broadening the trust boundary.
+
+---
+ .github/workflows/claude-code-review.yml | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/.github/workflows/claude-code-review.yml b/.github/workflows/claude-code-review.yml
+--- a/.github/workflows/claude-code-review.yml
++++ b/.github/workflows/claude-code-review.yml
+@@ -39,5 +39,6 @@ jobs:
+           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
+           plugins: 'code-review@claude-code-plugins'
+           prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
++          allowed_bots: 'claude[bot]'
+           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
+           # or https://code.claude.com/docs/en/cli-reference for available options
