@@ -526,14 +526,36 @@ func goBackendParams(modelPath string, opts options) (ml.BackendParams, error) {
 		gpuLayerCount = layerCount
 	}
 
-	layers := make([]int, 0, gpuLayerCount)
-	for i := 0; i < gpuLayerCount; i++ {
-		layers = append(layers, i)
+	// Distribute layers contiguously across all visible GPUs. The previous
+	// behavior — putting all layers on memory.GPUs[0] — fails for big models
+	// (e.g. qwen3-coder:30b ~18 GiB Q4_K_M, qwen3.6:27b ~30 GiB Q8_0) when
+	// any single device cannot satisfy the resulting contiguous weight buffer
+	// allocation. KL eval is insensitive to which GPU owns each layer, so a
+	// straightforward equal split across all devices is sufficient and
+	// matches what the production runner does.
+	gpuCount := len(memory.GPUs)
+	splits := make(ml.GPULayersList, 0, gpuCount)
+	base, extra := gpuLayerCount/gpuCount, gpuLayerCount%gpuCount
+	next := 0
+	for i := 0; i < gpuCount; i++ {
+		count := base
+		if i < extra {
+			count++
+		}
+		if count == 0 {
+			continue
+		}
+		layers := make([]int, count)
+		for j := 0; j < count; j++ {
+			layers[j] = next + j
+		}
+		next += count
+		splits = append(splits, ml.GPULayers{
+			DeviceID: memory.GPUs[i].DeviceID,
+			Layers:   layers,
+		})
 	}
-	params.GPULayers = ml.GPULayersList{{
-		DeviceID: memory.GPUs[0].DeviceID,
-		Layers:   layers,
-	}}
+	params.GPULayers = splits
 
 	return params, nil
 }

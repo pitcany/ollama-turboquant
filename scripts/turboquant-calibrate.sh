@@ -41,7 +41,14 @@
 #   -k  max allowed mean_kl for the validation gate                   (default 0.13)
 #   -n  num-ctx for tokenize and calibrate                            (default 1024)
 #   -L  sweep-limit (sequences per single-layer sweep)                (default 4)
-#   -V  validate-limit (0 = all sequences)                            (default 0)
+#   -V  validate-limit (0 = all sequences)                            (default 16)
+#       NB: -V 0 on a 30B+ model can take many hours. The Phase 0
+#       long-context numbers in TURBOQUANT-DEBUG-LOG.md show mean_kl
+#       converges by 16 sequences (KL is corpus-stable), so 16 is the
+#       defensible default. Use -V 0 only when validating a bundled
+#       artifact intended for upstream release.
+#   -S  reuse an existing sweep CSV, skipping step 2's per-layer sweep
+#       (compatible with cmd/turboquant-calibrate -sweep-csv)
 #   -B  batch-size for calibrate                                      (default 512)
 #   -G  num-gpu-layers for calibrate                                  (default 999)
 #   -o  artifact basename under manifest_data/, default
@@ -78,6 +85,7 @@ fi
 MODEL=""
 CORPUS=""
 SNAPSHOT=""
+SWEEP_CSV=""
 ARCH=""
 FTYPE=""
 HEAD_DIM=""
@@ -85,7 +93,7 @@ TOP=4
 MAX_MEAN_KL=0.13
 NUM_CTX=1024
 SWEEP_LIMIT=4
-VALIDATE_LIMIT=0
+VALIDATE_LIMIT=16
 BATCH_SIZE=512
 NUM_GPU_LAYERS=999
 ARTIFACT_BASENAME=""
@@ -102,6 +110,7 @@ while [[ $# -gt 0 ]]; do
     -m) MODEL="$2"; shift 2 ;;
     -c) CORPUS="$2"; shift 2 ;;
     -s) SNAPSHOT="$2"; shift 2 ;;
+    -S) SWEEP_CSV="$2"; shift 2 ;;
     -a) ARCH="$2"; shift 2 ;;
     -f) FTYPE="$2"; shift 2 ;;
     -d) HEAD_DIM="$2"; shift 2 ;;
@@ -152,6 +161,22 @@ WORK_ARTIFACT="$WORK_DIR/calibration.json"
 
 export GOCACHE="${GOCACHE:-/tmp/ollama-build-gocache}"
 
+# turboquant-calibrate spawns turboquant-eval subprocesses that need to find the
+# CUDA backend through Ollama's library discovery. Without OLLAMA_LIBRARY_PATH,
+# the eval subprocess looks beside its temp `go run` binary (which has no
+# ../lib/ollama) and falls back to CPU only — turning a 5-minute GPU sweep
+# into a multi-hour CPU sweep with no artifact written. Pin both directories:
+# the flat .so for in-process eval, and cuda_v12/ where the runtime actually
+# discovers the FA-vec kernels (libdirs=ollama,cuda_v12 in the runner log).
+DEFAULT_LIB="$ROOT/build/lib/ollama"
+if [[ -d "$DEFAULT_LIB" && -z "${OLLAMA_LIBRARY_PATH:-}" ]]; then
+  if [[ -d "$DEFAULT_LIB/cuda_v12" ]]; then
+    export OLLAMA_LIBRARY_PATH="$DEFAULT_LIB:$DEFAULT_LIB/cuda_v12"
+  else
+    export OLLAMA_LIBRARY_PATH="$DEFAULT_LIB"
+  fi
+fi
+
 echo "=== turboquant-calibrate.sh ==="
 echo "  model:         $MODEL"
 echo "  arch:          $ARCH"
@@ -163,6 +188,7 @@ echo "  num_ctx:       $NUM_CTX"
 echo "  artifact:      $ARTIFACT_DEST"
 echo "  work_dir:      $WORK_DIR"
 echo "  validated:     $VALIDATED_DATE"
+echo "  lib_path:      ${OLLAMA_LIBRARY_PATH:-<unset>}"
 echo
 
 # 1. Tokenize (or reuse).
@@ -183,21 +209,29 @@ fi
 echo
 
 # 2. Calibrate (sweep + selected-layer validation).
-echo "[2/5] Running cmd/turboquant-calibrate ($MODEL, top=$TOP)"
-go run ./cmd/turboquant-calibrate \
-  -model "$MODEL" \
-  -snapshot "$SNAPSHOT" \
-  -base-kv-cache-type turbo4 \
-  -reference-kv-cache-type f16 \
-  -layer-dtype q8_0 \
-  -top "$TOP" \
-  -sweep-limit "$SWEEP_LIMIT" \
-  -validate-limit "$VALIDATE_LIMIT" \
-  -num-ctx "$NUM_CTX" \
-  -batch-size "$BATCH_SIZE" \
-  -num-gpu-layers "$NUM_GPU_LAYERS" \
-  -artifact-dir "$WORK_DIR" \
+calibrate_args=(
+  -model "$MODEL"
+  -snapshot "$SNAPSHOT"
+  -base-kv-cache-type turbo4
+  -reference-kv-cache-type f16
+  -layer-dtype q8_0
+  -top "$TOP"
+  -sweep-limit "$SWEEP_LIMIT"
+  -validate-limit "$VALIDATE_LIMIT"
+  -num-ctx "$NUM_CTX"
+  -batch-size "$BATCH_SIZE"
+  -num-gpu-layers "$NUM_GPU_LAYERS"
+  -artifact-dir "$WORK_DIR"
   -output "$WORK_ARTIFACT"
+)
+if [[ -n "$SWEEP_CSV" ]]; then
+  [[ -f "$SWEEP_CSV" ]] || { echo "error: sweep csv not found: $SWEEP_CSV" >&2; exit 2; }
+  echo "[2/5] Running cmd/turboquant-calibrate ($MODEL, top=$TOP, reusing sweep CSV)"
+  calibrate_args+=(-sweep-csv "$SWEEP_CSV")
+else
+  echo "[2/5] Running cmd/turboquant-calibrate ($MODEL, top=$TOP)"
+fi
+go run ./cmd/turboquant-calibrate "${calibrate_args[@]}"
 echo
 
 # 3. Gate on mean_kl. The artifact's validation block is the candidate result.
