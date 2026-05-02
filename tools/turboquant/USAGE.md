@@ -73,6 +73,41 @@ The binary discovers the runtime backend via `../lib/ollama` relative
 to itself. Make sure `~/.local/lib/ollama` symlinks to your fork's
 `build/lib/ollama` directory.
 
+### Uninstalling
+
+To remove what `install-tq.sh` installed and switch back to upstream Ollama:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/pitcany/ollama-turboquant/turboquant/runtime/scripts/uninstall-tq.sh \
+  | bash -s -- --systemd --enable-vanilla
+```
+
+What it does:
+
+- Stops + disables the `ollama-tq.service` systemd unit (with `--systemd`)
+- Removes `~/.local/bin/{ollama-tq,ollama-serve-tq}`, the `~/.local/bin/ollama` symlink (only if it points at our binary), `~/.local/lib/ollama/`, and `~/.local/share/ollama-tq/`
+- Strips the `OLLAMA_HOST` export block from `~/.bashrc` (only the lines we added with our marker comment)
+- With `--enable-vanilla`: enables + starts the upstream `ollama.service` if it's already installed at `/etc/systemd/system/ollama.service`
+
+What it does **not** touch (intentionally):
+
+- `~/.ollama/models/` — your downloaded model blobs and metadata stay put
+- Any source-tree clones of this fork (`~/Work/ollama-build` or wherever)
+- Upstream Ollama at `/usr/local/bin/ollama` if you installed it separately
+
+Useful flags:
+
+- `--dry-run` — print what would be removed, change nothing
+- `--restore-backups` — after each removal, restore the most recent
+  `<file>.bak.<timestamp>` (created by `install-tq.sh` if it found an
+  existing file at that path during install)
+- `--purge` — also delete those backup files
+- `--keep-bashrc` — leave `~/.bashrc` untouched
+- `--prefix DIR` — uninstall from a non-default prefix
+- `-y` / `--yes` — skip the interactive confirmation prompt
+
+After the uninstall, open a new shell so `OLLAMA_HOST` is unset, and `ollama show` falls back to the upstream client + upstream server on the default port `11434`.
+
 ## 2. Start the server
 
 The wrapper sets the canonical env:
