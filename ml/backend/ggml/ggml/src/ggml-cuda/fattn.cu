@@ -153,6 +153,10 @@ static void ggml_cuda_flash_attn_ext_mma_f16(ggml_backend_cuda_context & ctx, gg
     FATTN_VEC_CASE(128, type_K, type_V)       \
     FATTN_VEC_CASE(256, type_K, type_V)       \
 
+// turbo*_0_64 variants are head_dim=64 only (block_size = QK_TURBO_64 = 64).
+#define FATTN_VEC_CASES_D64_ONLY(type_K, type_V) \
+    FATTN_VEC_CASE( 64, type_K, type_V)          \
+
 static void ggml_cuda_flash_attn_ext_vec(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     ggml_tensor * Q = dst->src[0];
     ggml_tensor * K = dst->src[1];
@@ -231,6 +235,31 @@ static void ggml_cuda_flash_attn_ext_vec(ggml_backend_cuda_context & ctx, ggml_t
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_TURBO5_0, GGML_TYPE_TURBO4_0)
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_TURBO6_0, GGML_TYPE_TURBO4_0)
 
+    // head_dim=64 turbo family (PR-3 of head_dim=64 series): only D=64 instances.
+    FATTN_VEC_CASES_D64_ONLY(GGML_TYPE_TURBO4_0_64, GGML_TYPE_TURBO4_0_64)
+    FATTN_VEC_CASES_D64_ONLY(GGML_TYPE_F16,         GGML_TYPE_TURBO4_0_64)
+    FATTN_VEC_CASES_D64_ONLY(GGML_TYPE_Q8_0,        GGML_TYPE_TURBO4_0_64)
+    FATTN_VEC_CASES_D64_ONLY(GGML_TYPE_TURBO4_0_64, GGML_TYPE_F16)
+    FATTN_VEC_CASES_D64_ONLY(GGML_TYPE_TURBO4_0_64, GGML_TYPE_Q8_0)
+
+    // PR-4: turbo{2,3}_0_64 K/V plus cross-pairings against turbo4_0_64 / f16 / q8_0.
+    FATTN_VEC_CASES_D64_ONLY(GGML_TYPE_TURBO2_0_64, GGML_TYPE_TURBO2_0_64)
+    FATTN_VEC_CASES_D64_ONLY(GGML_TYPE_TURBO3_0_64, GGML_TYPE_TURBO3_0_64)
+    FATTN_VEC_CASES_D64_ONLY(GGML_TYPE_F16,         GGML_TYPE_TURBO2_0_64)
+    FATTN_VEC_CASES_D64_ONLY(GGML_TYPE_F16,         GGML_TYPE_TURBO3_0_64)
+    FATTN_VEC_CASES_D64_ONLY(GGML_TYPE_Q8_0,        GGML_TYPE_TURBO2_0_64)
+    FATTN_VEC_CASES_D64_ONLY(GGML_TYPE_Q8_0,        GGML_TYPE_TURBO3_0_64)
+    FATTN_VEC_CASES_D64_ONLY(GGML_TYPE_TURBO2_0_64, GGML_TYPE_F16)
+    FATTN_VEC_CASES_D64_ONLY(GGML_TYPE_TURBO3_0_64, GGML_TYPE_F16)
+    FATTN_VEC_CASES_D64_ONLY(GGML_TYPE_TURBO2_0_64, GGML_TYPE_Q8_0)
+    FATTN_VEC_CASES_D64_ONLY(GGML_TYPE_TURBO3_0_64, GGML_TYPE_Q8_0)
+    FATTN_VEC_CASES_D64_ONLY(GGML_TYPE_TURBO2_0_64, GGML_TYPE_TURBO3_0_64)
+    FATTN_VEC_CASES_D64_ONLY(GGML_TYPE_TURBO3_0_64, GGML_TYPE_TURBO2_0_64)
+    FATTN_VEC_CASES_D64_ONLY(GGML_TYPE_TURBO2_0_64, GGML_TYPE_TURBO4_0_64)
+    FATTN_VEC_CASES_D64_ONLY(GGML_TYPE_TURBO3_0_64, GGML_TYPE_TURBO4_0_64)
+    FATTN_VEC_CASES_D64_ONLY(GGML_TYPE_TURBO4_0_64, GGML_TYPE_TURBO2_0_64)
+    FATTN_VEC_CASES_D64_ONLY(GGML_TYPE_TURBO4_0_64, GGML_TYPE_TURBO3_0_64)
+
     GGML_ABORT("fatal error");
 }
 
@@ -299,7 +328,9 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
 
     auto is_turbo_type = [](ggml_type t) {
         return t == GGML_TYPE_TURBO2_0 || t == GGML_TYPE_TURBO3_0 || t == GGML_TYPE_TURBO4_0 ||
-               t == GGML_TYPE_TURBO5_0 || t == GGML_TYPE_TURBO6_0;
+               t == GGML_TYPE_TURBO5_0 || t == GGML_TYPE_TURBO6_0 ||
+               t == GGML_TYPE_TURBO4_0_64 ||
+               t == GGML_TYPE_TURBO2_0_64 || t == GGML_TYPE_TURBO3_0_64;
     };
 
 #ifndef GGML_CUDA_FA_ALL_QUANTS
@@ -326,6 +357,9 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
         case GGML_TYPE_TURBO4_0:
         case GGML_TYPE_TURBO5_0:
         case GGML_TYPE_TURBO6_0:
+        case GGML_TYPE_TURBO4_0_64:
+        case GGML_TYPE_TURBO2_0_64:
+        case GGML_TYPE_TURBO3_0_64:
             break;
         default:
             return BEST_FATTN_KERNEL_NONE;
@@ -343,6 +377,10 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
     // If the vector kernel is unavailable, report the op as unsupported so the scheduler can
     // fall back instead of selecting MMA/WMMA/tile kernels that do not handle TurboQuant types.
     if (uses_turbo_kv) {
+        // The turbo4_0_64 kernels are only instantiated for D=64.
+        if ((K->type == GGML_TYPE_TURBO4_0_64 || V->type == GGML_TYPE_TURBO4_0_64) && K->ne[0] != 64) {
+            return BEST_FATTN_KERNEL_NONE;
+        }
         return can_use_vector_kernel ? BEST_FATTN_KERNEL_VEC : BEST_FATTN_KERNEL_NONE;
     }
 

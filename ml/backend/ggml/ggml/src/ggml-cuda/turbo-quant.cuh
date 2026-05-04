@@ -10,6 +10,7 @@
 
 #include "common.cuh"
 #include "turbo-innerq.cuh"
+#include "../ggml-turbo-quant-constants.h"
 #include <cstdlib>
 #include <cmath>
 
@@ -294,12 +295,7 @@ static bool turbo_innerq_is_active(void) {
 
 // ---- 4-bit centroids (Lloyd-Max for N(0, 1/128)) ----
 
-static __constant__ float TURBO_CENTROIDS_4BIT[16] = {
-    -0.173926f, -0.117195f, -0.089527f, -0.068756f,
-    -0.051262f, -0.035597f, -0.020989f, -0.006938f,
-     0.006938f,  0.020989f,  0.035597f,  0.051262f,
-     0.068756f,  0.089527f,  0.117195f,  0.173926f
-};
+static __constant__ float TURBO_CENTROIDS_4BIT[16] = TURBO_CENTROIDS_4BIT_VALUES;
 
 // ---- Midpoints for nearest 4-bit centroid lookup ----
 
@@ -349,6 +345,46 @@ static __device__ __forceinline__ float turbo4_dequant_element(
         const block_turbo4_0 * __restrict__ x, int j, float norm) {
     uint8_t idx = (x->qs[j / 2] >> ((j % 2) * 4)) & 0xF;
     return TURBO_CENTROIDS_4BIT[idx] * norm;
+}
+
+// ---- Per-block quantize for turbo4_0_64 (64 elements, expects already-rotated input) ----
+// Reuses TURBO_CENTROIDS_4BIT; the corrected_norm path absorbs the variance shift
+// from N(0, 1/128) (calibration target) to N(0, 1/64) (head_dim=64 reality).
+
+static __device__ void quantize_f32_turbo4_0_64_block(const float * __restrict__ src,
+                                                       block_turbo4_0_64 * __restrict__ dst) {
+    for (int j = 0; j < QK_TURBO_64 / 2; j++) dst->qs[j] = 0;
+
+    for (int j = 0; j < QK_TURBO_64; j++) {
+        uint8_t idx = turbo_nearest_centroid_4bit(src[j]);
+        dst->qs[j / 2] |= (idx & 0xF) << ((j % 2) * 4);
+    }
+}
+
+// ---- Inline dequant helper: extract one float from turbo4_0_64 block ----
+
+static __device__ __forceinline__ float turbo4_0_64_dequant_element(
+        const block_turbo4_0_64 * __restrict__ x, int j, float norm) {
+    uint8_t idx = (x->qs[j / 2] >> ((j % 2) * 4)) & 0xF;
+    return TURBO_CENTROIDS_4BIT[idx] * norm;
+}
+
+// ---- Inline dequant helpers for turbo{2,3}_0_64 ----
+// (per-block quantize helpers are not provided here — the SET_ROWS kernels
+// in set-rows.cu do the full quantize inline, mirroring turbo4_0_64.)
+
+static __device__ __forceinline__ float turbo2_0_64_dequant_element(
+        const block_turbo2_0_64 * __restrict__ x, int j, float norm) {
+    uint8_t idx = (x->qs[j / 4] >> ((j % 4) * 2)) & 0x3;
+    return TURBO_CENTROIDS_2BIT[idx] * norm;
+}
+
+static __device__ __forceinline__ float turbo3_0_64_dequant_element(
+        const block_turbo3_0_64 * __restrict__ x, int j, float norm) {
+    uint8_t low2 = (x->qs[j / 4] >> ((j % 4) * 2)) & 0x3;
+    uint8_t hi1  = (x->signs[j / 8] >> (j % 8)) & 0x1;
+    uint8_t idx  = low2 | (hi1 << 2);
+    return TURBO_CENTROIDS_3BIT[idx] * norm;
 }
 
 // ---- 5-bit centroids (Lloyd-Max for N(0, 1/128), seed=20260501) ----

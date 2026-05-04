@@ -881,18 +881,21 @@ func (f GGML) SupportsKVCacheType(cacheType string) bool {
 		return f.SupportsKVCacheType("turbo6") && f.SupportsKVCacheType("turbo4")
 	}
 
+	if cacheType == "kq8-vturbo4_64" {
+		return f.SupportsKVCacheType("q8_0") && f.SupportsKVCacheType("turbo4_64")
+	}
+
 	if slices.Contains([]string{"q8_0", "q4_0"}, cacheType) {
 		return true
 	}
 
 	if slices.Contains([]string{"turbo2", "turbo3", "turbo4", "turbo5", "turbo6"}, cacheType) {
-		// All turbo dtypes have blck_size = 128 (QK_TURBO{2,3,4,5,6}) and
+		// All base turbo dtypes have blck_size = 128 (QK_TURBO{2,3,4,5,6}) and
 		// the WHT/Hadamard rotation is structurally tied to that block.
 		// kvcache.Causal allocates K/V as (head_dim, num_kv_heads, cells),
 		// so the leading dim must be a multiple of 128 (and >= 128) for the
-		// underlying tensor to be addressable. Models with head_dim < 128
-		// (gpt-oss has 64) need the head-packed turbo follow-up; until that
-		// lands, refuse turbo dtypes here so the runtime falls back to f16.
+		// underlying tensor to be addressable. Models with head_dim = 64
+		// (gpt-oss) need the head-packed turbo*_64 variants below.
 		// Both K and V sides must satisfy the constraint because turbo can
 		// live on either half of a split preset (e.g. kq8-vturbo4).
 		headDimK := f.KV().EmbeddingHeadCountK()
@@ -901,6 +904,18 @@ func (f GGML) SupportsKVCacheType(cacheType string) bool {
 			return false
 		}
 		return headDimK >= 128 && headDimK%128 == 0 && headDimV >= 128 && headDimV%128 == 0
+	}
+
+	if slices.Contains([]string{"turbo2_64", "turbo3_64", "turbo4_64"}, cacheType) {
+		// Head-packed turbo variants use blck_size = QK_TURBO_64 = 64 with a
+		// 64-element WHT rotation, so the leading dim of the K/V tensor must be
+		// a multiple of 64 (and >= 64). Same per-side requirement as above.
+		headDimK := f.KV().EmbeddingHeadCountK()
+		headDimV := f.KV().EmbeddingHeadCountV()
+		if headDimK == 0 || headDimV == 0 {
+			return false
+		}
+		return headDimK >= 64 && headDimK%64 == 0 && headDimV >= 64 && headDimV%64 == 0
 	}
 
 	return false
@@ -974,6 +989,12 @@ func kvCacheBytesPerElement(cacheType string) float64 {
 		return 84.0 / 128.0 // 0.656 bytes/element (5-bit PolarQuant: 80B qs + 4B norm/rnorm per 128 elems)
 	case "turbo6":
 		return 100.0 / 128.0 // 0.781 bytes/element (6-bit PolarQuant: 96B qs + 4B norm/rnorm per 128 elems)
+	case "turbo2_64":
+		return 18.0 / 64.0 // 0.281 bytes/element (2-bit PolarQuant, head_dim=64 packing)
+	case "turbo3_64":
+		return 26.0 / 64.0 // 0.406 bytes/element (3-bit PolarQuant, head_dim=64 packing)
+	case "turbo4_64":
+		return 34.0 / 64.0 // 0.531 bytes/element (4-bit PolarQuant, head_dim=64 packing)
 	case "f32":
 		return 4 // f32 (default for recurrent)
 	default:
@@ -987,6 +1008,8 @@ func kvCacheBytesPerElementKV(cacheType string) (float64, float64) {
 		return kvCacheBytesPerElement("q8_0"), kvCacheBytesPerElement("turbo4")
 	case "kturbo6-vturbo4":
 		return kvCacheBytesPerElement("turbo6"), kvCacheBytesPerElement("turbo4")
+	case "kq8-vturbo4_64":
+		return kvCacheBytesPerElement("q8_0"), kvCacheBytesPerElement("turbo4_64")
 	default:
 		bytesPerElement := kvCacheBytesPerElement(cacheType)
 		return bytesPerElement, bytesPerElement
