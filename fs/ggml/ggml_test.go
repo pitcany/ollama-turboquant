@@ -33,8 +33,8 @@ func makeGGML(t *testing.T, kv KV) GGML {
 }
 
 func TestSupportsKVCacheType_TurboHeadDim(t *testing.T) {
-	// All turbo dtypes have blck_size=128 and require head_dim>=128 with
-	// head_dim%128==0 on both K and V sides.
+	// Base turbo dtypes have blck_size=128 (head_dim>=128, head_dim%128==0).
+	// Head-packed turbo*_64 dtypes have blck_size=64 (head_dim>=64, head_dim%64==0).
 	cases := []struct {
 		name      string
 		cacheType string
@@ -55,6 +55,18 @@ func TestSupportsKVCacheType_TurboHeadDim(t *testing.T) {
 		{name: "kq8-vturbo4 head_dim=128", cacheType: "kq8-vturbo4", kHeadDim: 128, vHeadDim: 128, want: true},
 		{name: "kq8-vturbo4 head_dim=64 rejected", cacheType: "kq8-vturbo4", kHeadDim: 64, vHeadDim: 64, want: false},
 		{name: "kturbo6-vturbo4 head_dim=64 rejected", cacheType: "kturbo6-vturbo4", kHeadDim: 64, vHeadDim: 64, want: false},
+		// turbo*_64: must accept head_dim=64 and any multiple of 64 on both sides.
+		{name: "turbo4_64 head_dim=64", cacheType: "turbo4_64", kHeadDim: 64, vHeadDim: 64, want: true},
+		{name: "turbo4_64 head_dim=128", cacheType: "turbo4_64", kHeadDim: 128, vHeadDim: 128, want: true},
+		{name: "turbo4_64 head_dim=192", cacheType: "turbo4_64", kHeadDim: 192, vHeadDim: 192, want: true},
+		{name: "turbo4_64 head_dim=32 rejected", cacheType: "turbo4_64", kHeadDim: 32, vHeadDim: 32, want: false},
+		{name: "turbo4_64 head_dim=96 rejected (not multiple of 64)", cacheType: "turbo4_64", kHeadDim: 96, vHeadDim: 96, want: false},
+		{name: "turbo2_64 head_dim=64", cacheType: "turbo2_64", kHeadDim: 64, vHeadDim: 64, want: true},
+		{name: "turbo3_64 head_dim=64", cacheType: "turbo3_64", kHeadDim: 64, vHeadDim: 64, want: true},
+		{name: "turbo4_64 asymmetric (kHead=128 vHead=64)", cacheType: "turbo4_64", kHeadDim: 128, vHeadDim: 64, want: true},
+		{name: "turbo4_64 asymmetric (kHead=32 vHead=64)", cacheType: "turbo4_64", kHeadDim: 32, vHeadDim: 64, want: false},
+		{name: "kq8-vturbo4_64 head_dim=64", cacheType: "kq8-vturbo4_64", kHeadDim: 64, vHeadDim: 64, want: true},
+		{name: "kq8-vturbo4_64 head_dim=128", cacheType: "kq8-vturbo4_64", kHeadDim: 128, vHeadDim: 128, want: true},
 		{name: "q8_0 always supported", cacheType: "q8_0", kHeadDim: 64, vHeadDim: 64, want: true},
 		{name: "q4_0 always supported", cacheType: "q4_0", kHeadDim: 64, vHeadDim: 64, want: true},
 		{name: "f16 always supported", cacheType: "f16", kHeadDim: 64, vHeadDim: 64, want: true},
@@ -95,6 +107,10 @@ func TestKVCacheBytesPerElementKV(t *testing.T) {
 		{name: "shared turbo4", in: "turbo4", wantK: 68.0 / 128.0, wantV: 68.0 / 128.0},
 		{name: "safe split preset", in: "kq8-vturbo4", wantK: 1, wantV: 68.0 / 128.0},
 		{name: "k6 split preset", in: "kturbo6-vturbo4", wantK: 100.0 / 128.0, wantV: 68.0 / 128.0},
+		{name: "shared turbo2_64", in: "turbo2_64", wantK: 18.0 / 64.0, wantV: 18.0 / 64.0},
+		{name: "shared turbo3_64", in: "turbo3_64", wantK: 26.0 / 64.0, wantV: 26.0 / 64.0},
+		{name: "shared turbo4_64", in: "turbo4_64", wantK: 34.0 / 64.0, wantV: 34.0 / 64.0},
+		{name: "head_dim=64 split preset", in: "kq8-vturbo4_64", wantK: 1, wantV: 34.0 / 64.0},
 	}
 
 	for _, tt := range tests {

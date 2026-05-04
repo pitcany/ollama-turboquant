@@ -414,6 +414,12 @@ const (
 	DTypeTurbo4
 	DTypeTurbo5
 	DTypeTurbo6
+	// Head-packed turbo variants (blck_size = 64) for models with head_dim = 64.
+	// Same PolarQuant + WHT structure as the base turbo dtypes but with a 64-element
+	// rotation group, so they can address tensors whose leading dim is 64.
+	DTypeTurbo2_64
+	DTypeTurbo3_64
+	DTypeTurbo4_64
 )
 
 type SamplingMode int

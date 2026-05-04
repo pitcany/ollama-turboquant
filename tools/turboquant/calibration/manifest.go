@@ -14,15 +14,23 @@ var manifestFS embed.FS
 // ManifestEntry maps a (architecture, file_type, head_dim) tuple to a
 // bundled calibration artifact. file_type is matched case-insensitively
 // against the GGUF file type string (e.g. "Q4_K_M").
+//
+// When Artifact is empty, BaseKVCacheType (and optional KeyCacheLayerTypes)
+// supply an inline preset so the resolver can recommend a head-dim-aware
+// base cache type without requiring a bundled calibration JSON. This lets
+// the runtime select e.g. turbo4_64 for head_dim=64 models before per-layer
+// calibration data is produced.
 type ManifestEntry struct {
-	Architecture     string  `json:"architecture"`
-	FileType         string  `json:"file_type"`
-	HeadDim          int     `json:"head_dim"`
-	Artifact         string  `json:"artifact"`
-	ModelHint        string  `json:"model_hint,omitempty"`
-	Validated        string  `json:"validated,omitempty"`
-	Phase0MeanKL     float64 `json:"phase0_mean_kl,omitempty"`
-	Phase0Perplexity float64 `json:"phase0_perplexity,omitempty"`
+	Architecture       string  `json:"architecture"`
+	FileType           string  `json:"file_type"`
+	HeadDim            int     `json:"head_dim"`
+	Artifact           string  `json:"artifact,omitempty"`
+	BaseKVCacheType    string  `json:"base_kv_cache_type,omitempty"`
+	KeyCacheLayerTypes string  `json:"key_cache_layer_types,omitempty"`
+	ModelHint          string  `json:"model_hint,omitempty"`
+	Validated          string  `json:"validated,omitempty"`
+	Phase0MeanKL       float64 `json:"phase0_mean_kl,omitempty"`
+	Phase0Perplexity   float64 `json:"phase0_perplexity,omitempty"`
 }
 
 // Manifest is the bundled list of calibrations shipped with the binary.
@@ -59,6 +67,13 @@ func LoadEmbeddedManifest() (*Manifest, error) {
 // match, where source is a human-readable identifier suitable for logs.
 // Returns (nil, "", false) when no entry matches; the caller should fall
 // back to manifest.DefaultFallback or another safe preset.
+//
+// If the matched entry has Artifact set, the embedded calibration JSON is
+// loaded. Otherwise — when BaseKVCacheType is set inline — a synthetic
+// Artifact is returned that carries the inline preset (no per-layer overrides
+// unless KeyCacheLayerTypes is also set). The synthetic-artifact path lets
+// new head-dim regimes (e.g. head_dim=64 → turbo4_64) ship before a real
+// calibration is produced.
 func (m *Manifest) Resolve(architecture, fileType string, headDim int) (*Artifact, string, bool) {
 	if m == nil {
 		return nil, "", false
@@ -75,11 +90,21 @@ func (m *Manifest) Resolve(architecture, fileType string, headDim int) (*Artifac
 		if entry.HeadDim != 0 && entry.HeadDim != headDim {
 			continue
 		}
-		artifact, err := loadEmbeddedArtifact(entry.Artifact)
-		if err != nil {
-			continue
+		if strings.TrimSpace(entry.Artifact) != "" {
+			artifact, err := loadEmbeddedArtifact(entry.Artifact)
+			if err != nil {
+				continue
+			}
+			return artifact, entry.Artifact, true
 		}
-		return artifact, entry.Artifact, true
+		if strings.TrimSpace(entry.BaseKVCacheType) != "" {
+			source := fmt.Sprintf("inline:%s/%s/head_dim=%d", entry.Architecture, entry.FileType, entry.HeadDim)
+			return &Artifact{
+				Version:            1,
+				BaseKVCacheType:    entry.BaseKVCacheType,
+				KeyCacheLayerTypes: entry.KeyCacheLayerTypes,
+			}, source, true
+		}
 	}
 	return nil, "", false
 }
@@ -165,6 +190,8 @@ func bytesPerElementForCacheType(cacheType string) (float64, float64) {
 	switch strings.ToLower(strings.TrimSpace(cacheType)) {
 	case "kq8-vturbo4":
 		return 1.0, 68.0 / 128.0
+	case "kq8-vturbo4_64":
+		return 1.0, 34.0 / 64.0
 	case "q8_0":
 		return 1.0, 1.0
 	case "q4_0":
@@ -175,6 +202,12 @@ func bytesPerElementForCacheType(cacheType string) (float64, float64) {
 		return 50.0 / 128.0, 50.0 / 128.0
 	case "turbo4":
 		return 68.0 / 128.0, 68.0 / 128.0
+	case "turbo2_64":
+		return 18.0 / 64.0, 18.0 / 64.0
+	case "turbo3_64":
+		return 26.0 / 64.0, 26.0 / 64.0
+	case "turbo4_64":
+		return 34.0 / 64.0, 34.0 / 64.0
 	case "f32":
 		return 4.0, 4.0
 	default:

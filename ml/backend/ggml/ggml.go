@@ -987,7 +987,8 @@ func shouldDumpTurboQuantNode(node *C.struct_ggml_tensor, includePacked bool, in
 }
 
 func isTurboQuantType(t C.enum_ggml_type) bool {
-	return t == C.GGML_TYPE_TURBO2_0 || t == C.GGML_TYPE_TURBO3_0 || t == C.GGML_TYPE_TURBO4_0
+	return t == C.GGML_TYPE_TURBO2_0 || t == C.GGML_TYPE_TURBO3_0 || t == C.GGML_TYPE_TURBO4_0 ||
+		t == C.GGML_TYPE_TURBO2_0_64 || t == C.GGML_TYPE_TURBO3_0_64 || t == C.GGML_TYPE_TURBO4_0_64
 }
 
 func sanitizeDumpName(s string) string {
@@ -1293,6 +1294,12 @@ func (t *Tensor) DType() ml.DType {
 		return ml.DTypeTurbo5
 	case C.GGML_TYPE_TURBO6_0:
 		return ml.DTypeTurbo6
+	case C.GGML_TYPE_TURBO2_0_64:
+		return ml.DTypeTurbo2_64
+	case C.GGML_TYPE_TURBO3_0_64:
+		return ml.DTypeTurbo3_64
+	case C.GGML_TYPE_TURBO4_0_64:
+		return ml.DTypeTurbo4_64
 	default:
 		return ml.DTypeOther
 	}
@@ -1322,6 +1329,12 @@ func ggmlDType(dtype ml.DType) uint32 {
 		return C.GGML_TYPE_TURBO5_0
 	case ml.DTypeTurbo6:
 		return C.GGML_TYPE_TURBO6_0
+	case ml.DTypeTurbo2_64:
+		return C.GGML_TYPE_TURBO2_0_64
+	case ml.DTypeTurbo3_64:
+		return C.GGML_TYPE_TURBO3_0_64
+	case ml.DTypeTurbo4_64:
+		return C.GGML_TYPE_TURBO4_0_64
 	default:
 		panic("unsupported dtype")
 	}
