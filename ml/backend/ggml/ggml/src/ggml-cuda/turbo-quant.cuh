@@ -351,6 +351,28 @@ static __device__ __forceinline__ float turbo4_dequant_element(
     return TURBO_CENTROIDS_4BIT[idx] * norm;
 }
 
+// ---- Per-block quantize for turbo4_0_64 (64 elements, expects already-rotated input) ----
+// Reuses TURBO_CENTROIDS_4BIT; the corrected_norm path absorbs the variance shift
+// from N(0, 1/128) (calibration target) to N(0, 1/64) (head_dim=64 reality).
+
+static __device__ void quantize_f32_turbo4_0_64_block(const float * __restrict__ src,
+                                                       block_turbo4_0_64 * __restrict__ dst) {
+    for (int j = 0; j < QK_TURBO_64 / 2; j++) dst->qs[j] = 0;
+
+    for (int j = 0; j < QK_TURBO_64; j++) {
+        uint8_t idx = turbo_nearest_centroid_4bit(src[j]);
+        dst->qs[j / 2] |= (idx & 0xF) << ((j % 2) * 4);
+    }
+}
+
+// ---- Inline dequant helper: extract one float from turbo4_0_64 block ----
+
+static __device__ __forceinline__ float turbo4_0_64_dequant_element(
+        const block_turbo4_0_64 * __restrict__ x, int j, float norm) {
+    uint8_t idx = (x->qs[j / 2] >> ((j % 2) * 4)) & 0xF;
+    return TURBO_CENTROIDS_4BIT[idx] * norm;
+}
+
 // ---- 5-bit centroids (Lloyd-Max for N(0, 1/128), seed=20260501) ----
 
 static __constant__ float TURBO_CENTROIDS_5BIT[32] = {
