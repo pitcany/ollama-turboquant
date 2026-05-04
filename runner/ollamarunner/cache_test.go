@@ -561,6 +561,11 @@ func TestKVCacheTypesFromStr(t *testing.T) {
 		{name: "case insensitive split preset", in: "KQ8-VTURBO4", wantK: ml.DTypeQ80, wantV: ml.DTypeTurbo4},
 		{name: "k6 split preset", in: "kturbo6-vturbo4", wantK: ml.DTypeTurbo6, wantV: ml.DTypeTurbo4},
 		{name: "k6 case insensitive", in: "KTURBO6-VTURBO4", wantK: ml.DTypeTurbo6, wantV: ml.DTypeTurbo4},
+		{name: "head_dim=64 shared turbo2", in: "turbo2_64", wantK: ml.DTypeTurbo2_64, wantV: ml.DTypeTurbo2_64},
+		{name: "head_dim=64 shared turbo3", in: "turbo3_64", wantK: ml.DTypeTurbo3_64, wantV: ml.DTypeTurbo3_64},
+		{name: "head_dim=64 shared turbo4", in: "turbo4_64", wantK: ml.DTypeTurbo4_64, wantV: ml.DTypeTurbo4_64},
+		{name: "head_dim=64 split preset", in: "kq8-vturbo4_64", wantK: ml.DTypeQ80, wantV: ml.DTypeTurbo4_64},
+		{name: "head_dim=64 split preset case insensitive", in: "KQ8-VTURBO4_64", wantK: ml.DTypeQ80, wantV: ml.DTypeTurbo4_64},
 	}
 
 	for _, tt := range tests {
@@ -795,6 +800,64 @@ func TestDowngradeTurboForBackendNonTurboNoChange(t *testing.T) {
 	gotKV, gotSpec := downgradeTurboForBackend(be, "q8_0", "0:q8_0")
 	if gotKV != "q8_0" || gotSpec != "0:q8_0" {
 		t.Fatalf("non-Turbo input was modified: kv=%q spec=%q", gotKV, gotSpec)
+	}
+}
+
+// TestKVCacheSelectionByHeadDim covers the runtime side of the head_dim=64 vs
+// head_dim=128 selection paths: a caller that knows its model's head_dim picks
+// the appropriate cache type string, and the runtime's InitKVCache must thread
+// the right ml.DType through to the underlying cache. Together with the
+// fs/ggml.SupportsKVCacheType tests for head_dim gating, this fixes both
+// halves of the head-packed turbo selection contract.
+func TestKVCacheSelectionByHeadDim(t *testing.T) {
+	tests := []struct {
+		name         string
+		cacheType    string
+		wantKey      ml.DType
+		wantValue    ml.DType
+		wantInitMode string // "split" or "shared"
+	}{
+		{name: "head_dim=128 shared turbo4", cacheType: "turbo4", wantKey: ml.DTypeTurbo4, wantValue: ml.DTypeTurbo4, wantInitMode: "shared"},
+		{name: "head_dim=128 split kq8-vturbo4", cacheType: "kq8-vturbo4", wantKey: ml.DTypeQ80, wantValue: ml.DTypeTurbo4, wantInitMode: "split"},
+		{name: "head_dim=64 shared turbo2_64", cacheType: "turbo2_64", wantKey: ml.DTypeTurbo2_64, wantValue: ml.DTypeTurbo2_64, wantInitMode: "shared"},
+		{name: "head_dim=64 shared turbo3_64", cacheType: "turbo3_64", wantKey: ml.DTypeTurbo3_64, wantValue: ml.DTypeTurbo3_64, wantInitMode: "shared"},
+		{name: "head_dim=64 shared turbo4_64", cacheType: "turbo4_64", wantKey: ml.DTypeTurbo4_64, wantValue: ml.DTypeTurbo4_64, wantInitMode: "shared"},
+		{name: "head_dim=64 split kq8-vturbo4_64", cacheType: "kq8-vturbo4_64", wantKey: ml.DTypeQ80, wantValue: ml.DTypeTurbo4_64, wantInitMode: "split"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cache := &mockCache{}
+			if err := initKVCache(cache, nil, tt.cacheType, "", 2, 8, 4); err != nil {
+				t.Fatalf("initKVCache(%q) error = %v", tt.cacheType, err)
+			}
+			switch tt.wantInitMode {
+			case "shared":
+				if !cache.initCalled || cache.initSplitCalled {
+					t.Fatalf("init mode mismatch: initCalled=%v initSplitCalled=%v, want shared init", cache.initCalled, cache.initSplitCalled)
+				}
+			case "split":
+				if cache.initCalled || !cache.initSplitCalled {
+					t.Fatalf("init mode mismatch: initCalled=%v initSplitCalled=%v, want split init", cache.initCalled, cache.initSplitCalled)
+				}
+			}
+			if cache.keyDType != tt.wantKey || cache.valueDType != tt.wantValue {
+				t.Fatalf("dtypes = (%v, %v), want (%v, %v)", cache.keyDType, cache.valueDType, tt.wantKey, tt.wantValue)
+			}
+		})
+	}
+}
+
+func TestDowngradeTurboForBackendCPUDowngradesHeadDim64(t *testing.T) {
+	// CPU has no Turbo kernels at all (CUDA-only), so the head_dim=64
+	// variants must downgrade to q8_0 the same way the head_dim=128 ones do.
+	be := &fakeBackend{devices: []ml.DeviceInfo{{DeviceID: ml.DeviceID{Library: "CPU"}}}}
+	gotKV, gotSpec := downgradeTurboForBackend(be, "kq8-vturbo4_64", "0:turbo4_64,1:q8_0,3:turbo3_64")
+	if gotKV != "q8_0" {
+		t.Fatalf("kv = %q, want q8_0 (CPU downgrade)", gotKV)
+	}
+	if gotSpec != "0:q8_0,1:q8_0,3:q8_0" {
+		t.Fatalf("spec = %q, want all-q8_0 after downgrade", gotSpec)
 	}
 }
 
