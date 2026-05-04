@@ -1344,17 +1344,17 @@ size_t quantize_tq4_1s(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst
  * (PR-3), and runtime resolver wiring (PR-5) follow.
  */
 
+static const float CENTROIDS_4BIT_64[16] = {
+    -0.173926f, -0.117195f, -0.089527f, -0.068756f,
+    -0.051262f, -0.035597f, -0.020989f, -0.006938f,
+     0.006938f,  0.020989f,  0.035597f,  0.051262f,
+     0.068756f,  0.089527f,  0.117195f,  0.173926f
+};
+
 void quantize_row_turbo4_0_64_ref(const float * GGML_RESTRICT x, block_turbo4_0_64 * GGML_RESTRICT y, int64_t k) {
     assert(k % QK_TURBO_64 == 0);
     const int nb = (int)(k / QK_TURBO_64);
     const int d  = QK_TURBO_64;
-
-    static const float CENTROIDS_4BIT[16] = {
-        -0.173926f, -0.117195f, -0.089527f, -0.068756f,
-        -0.051262f, -0.035597f, -0.020989f, -0.006938f,
-         0.006938f,  0.020989f,  0.035597f,  0.051262f,
-         0.068756f,  0.089527f,  0.117195f,  0.173926f
-    };
 
     for (int block = 0; block < nb; block++) {
         const float * src = x + block * d;
@@ -1381,7 +1381,7 @@ void quantize_row_turbo4_0_64_ref(const float * GGML_RESTRICT x, block_turbo4_0_
         float recon_norm_sq = 0.0f;
         for (int i = 0; i < d; i++) {
             indices[i] = (uint8_t)nearest_centroid_4bit(buf[i]);
-            recon_norm_sq += CENTROIDS_4BIT[indices[i]] * CENTROIDS_4BIT[indices[i]];
+            recon_norm_sq += CENTROIDS_4BIT_64[indices[i]] * CENTROIDS_4BIT_64[indices[i]];
         }
         const float recon_norm = sqrtf(recon_norm_sq);
         const float corrected_norm = (recon_norm > 1e-10f) ? norm / recon_norm : norm;
@@ -1400,19 +1400,12 @@ void dequantize_row_turbo4_0_64(const block_turbo4_0_64 * GGML_RESTRICT x, float
     const int nb = (int)(k / QK_TURBO_64);
     const int d  = QK_TURBO_64;
 
-    static const float CENTROIDS_4BIT[16] = {
-        -0.173926f, -0.117195f, -0.089527f, -0.068756f,
-        -0.051262f, -0.035597f, -0.020989f, -0.006938f,
-         0.006938f,  0.020989f,  0.035597f,  0.051262f,
-         0.068756f,  0.089527f,  0.117195f,  0.173926f
-    };
-
     for (int block = 0; block < nb; block++) {
         const float norm = GGML_FP16_TO_FP32(x[block].norm);
         float * dst = y + block * d;
         for (int i = 0; i < d; i++) {
             const uint8_t idx = (x[block].qs[i / 2] >> ((i % 2) * 4)) & 0xF;
-            dst[i] = CENTROIDS_4BIT[idx] * norm;
+            dst[i] = CENTROIDS_4BIT_64[idx] * norm;
         }
         /* Stays in rotated domain. The graph's GGML_OP_TURBO_WHT inverts. */
     }
