@@ -106,3 +106,17 @@ static __device__ __forceinline__ void dequantize_turbo4_0_64(const void * vx, c
     v.x = turbo4_0_64_dequant_element(&x[ib], 2*iqs + 0, norm);
     v.y = turbo4_0_64_dequant_element(&x[ib], 2*iqs + 1, norm);
 }
+
+static __device__ __forceinline__ void dequantize_turbo2_0_64(const void * vx, const int64_t ib, const int iqs, float2 & v) {
+    const block_turbo2_0_64 * x = (const block_turbo2_0_64 *) vx;
+    const float norm = __half2float(x[ib].norm);
+    v.x = turbo2_0_64_dequant_element(&x[ib], 2*iqs + 0, norm);
+    v.y = turbo2_0_64_dequant_element(&x[ib], 2*iqs + 1, norm);
+}
+
+static __device__ __forceinline__ void dequantize_turbo3_0_64(const void * vx, const int64_t ib, const int iqs, float2 & v) {
+    const block_turbo3_0_64 * x = (const block_turbo3_0_64 *) vx;
+    const float norm = __half2float(x[ib].norm);
+    v.x = turbo3_0_64_dequant_element(&x[ib], 2*iqs + 0, norm);
+    v.y = turbo3_0_64_dequant_element(&x[ib], 2*iqs + 1, norm);
+}
