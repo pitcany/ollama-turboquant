@@ -99,3 +99,10 @@ static __device__ __forceinline__ void dequantize_turbo4_0(const void * vx, cons
     v.x = turbo4_dequant_element(&x[ib], 2*iqs + 0, norm);
     v.y = turbo4_dequant_element(&x[ib], 2*iqs + 1, norm);
 }
+
+static __device__ __forceinline__ void dequantize_turbo4_0_64(const void * vx, const int64_t ib, const int iqs, float2 & v) {
+    const block_turbo4_0_64 * x = (const block_turbo4_0_64 *) vx;
+    const float norm = __half2float(x[ib].norm);
+    v.x = turbo4_0_64_dequant_element(&x[ib], 2*iqs + 0, norm);
+    v.y = turbo4_0_64_dequant_element(&x[ib], 2*iqs + 1, norm);
+}

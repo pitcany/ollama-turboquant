@@ -10,6 +10,7 @@
 
 #include "common.cuh"
 #include "turbo-innerq.cuh"
+#include "../ggml-turbo-quant-constants.h"
 #include <cstdlib>
 #include <cmath>
 
@@ -294,12 +295,7 @@ static bool turbo_innerq_is_active(void) {
 
 // ---- 4-bit centroids (Lloyd-Max for N(0, 1/128)) ----
 
-static __constant__ float TURBO_CENTROIDS_4BIT[16] = {
-    -0.173926f, -0.117195f, -0.089527f, -0.068756f,
-    -0.051262f, -0.035597f, -0.020989f, -0.006938f,
-     0.006938f,  0.020989f,  0.035597f,  0.051262f,
-     0.068756f,  0.089527f,  0.117195f,  0.173926f
-};
+static __constant__ float TURBO_CENTROIDS_4BIT[16] = TURBO_CENTROIDS_4BIT_VALUES;
 
 // ---- Midpoints for nearest 4-bit centroid lookup ----
 
