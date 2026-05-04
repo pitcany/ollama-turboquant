@@ -32,6 +32,16 @@
       "validated": "2026-05-02",
       "phase0_mean_kl": 0.015504599040162792,
       "phase0_perplexity": 6.296513747239935
+    },
+    {
+      "architecture": "qwen3moe",
+      "file_type": "Q8_0",
+      "head_dim": 128,
+      "artifact": "qwen3moe-q8_0-adaptive.json",
+      "model_hint": "qwen3-coder:30b-a3b-q8_0",
+      "validated": "2026-05-04",
+      "phase0_mean_kl": 0.0453099799176939,
+      "phase0_perplexity": 9.157841640345037
     }
   ]
 }
