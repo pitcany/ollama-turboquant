@@ -426,7 +426,9 @@ extern "C" {
         GGML_TYPE_TURBO6_0 = 41, // TurboQuant 6-bit KV cache
         // 42..59 reserved for upstream additions (forward-compat headroom)
         GGML_TYPE_TURBO4_0_64 = 60, // TurboQuant 4-bit KV cache, head_dim=64 (PR-1: CPU reference)
-        GGML_TYPE_COUNT   = 61,
+        GGML_TYPE_TURBO2_0_64 = 61, // TurboQuant 2-bit KV cache, head_dim=64 (PR-4)
+        GGML_TYPE_TURBO3_0_64 = 62, // TurboQuant 3-bit KV cache, head_dim=64 (PR-4)
+        GGML_TYPE_COUNT   = 63,
     };
 
     // precision

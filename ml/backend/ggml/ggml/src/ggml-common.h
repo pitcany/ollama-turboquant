@@ -325,6 +325,33 @@ typedef struct {
 static_assert(sizeof(block_turbo4_0_64) == sizeof(ggml_half) + QK_TURBO_64/2, "wrong turbo4_0_64 block size");
 static_assert(QK_TURBO_64 == 64, "turbo4_0_64 kernels assume QK_TURBO_64 == 64");
 
+// TurboQuant 2-bit, head_dim=64 variant: 2-bit PolarQuant indices, no QJL.
+// Layout matches turbo2_0 but with half the payload (block_size = 64).
+// Per block: norm(fp16) + 2-bit indices (16 bytes) = 18 bytes per 64 values
+// = 2.25 bits/value -> 7.11x compression vs fp16.
+// PR-4: CPU reference + CUDA + FA-vec instances.
+#define NL_TURBO2_64     (QK_TURBO_64 / 16)   // 4
+#define NL_TURBO2_64_VEC (QK_TURBO_64 / 4)    // 16
+typedef struct {
+    ggml_half  norm;                          //  2 bytes: corrected L2 norm
+    uint8_t    qs[QK_TURBO_64 / 4];           // 16 bytes: 2-bit indices (4 per byte)
+} block_turbo2_0_64;                          // 18 bytes total
+static_assert(sizeof(block_turbo2_0_64) == sizeof(ggml_half) + QK_TURBO_64/4, "wrong turbo2_0_64 block size");
+
+// TurboQuant 3-bit, head_dim=64 variant: 3-bit PolarQuant indices (no QJL).
+// Layout matches turbo3_0 but with half the payload (block_size = 64).
+// Per block: norm(fp16) + lower-2-bit qs (16 bytes) + upper-1-bit signs (8 bytes)
+// = 26 bytes per 64 values = 3.25 bits/value -> 4.92x compression vs fp16.
+// PR-4: CPU reference + CUDA + FA-vec instances.
+#define NL_TURBO3_64     (QK_TURBO_64 / 16)   // 4
+#define NL_TURBO3_64_VEC (QK_TURBO_64 / 4)    // 16
+typedef struct {
+    ggml_half  norm;                          //  2 bytes: corrected L2 norm
+    uint8_t    qs[QK_TURBO_64 / 4];           // 16 bytes: lower 2-bit indices (4 per byte)
+    uint8_t    signs[QK_TURBO_64 / 8];        //  8 bytes: upper 1-bit of 3-bit index
+} block_turbo3_0_64;                          // 26 bytes total
+static_assert(sizeof(block_turbo3_0_64) == sizeof(ggml_half) + QK_TURBO_64/4 + QK_TURBO_64/8, "wrong turbo3_0_64 block size");
+
 // TurboQuant 2-bit: 2-bit PolarQuant indices only (no QJL)
 // Per block: norm(fp16) + 2-bit indices (8 bytes) = 10 bytes per 32 values
 // = 2.5 bits/value -> 6.4x compression vs fp16
