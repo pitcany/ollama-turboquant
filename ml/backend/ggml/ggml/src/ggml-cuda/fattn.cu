@@ -377,6 +377,10 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
     // If the vector kernel is unavailable, report the op as unsupported so the scheduler can
     // fall back instead of selecting MMA/WMMA/tile kernels that do not handle TurboQuant types.
     if (uses_turbo_kv) {
+        // The turbo4_0_64 kernels are only instantiated for D=64.
+        if ((K->type == GGML_TYPE_TURBO4_0_64 || V->type == GGML_TYPE_TURBO4_0_64) && K->ne[0] != 64) {
+            return BEST_FATTN_KERNEL_NONE;
+        }
         return can_use_vector_kernel ? BEST_FATTN_KERNEL_VEC : BEST_FATTN_KERNEL_NONE;
     }
 
