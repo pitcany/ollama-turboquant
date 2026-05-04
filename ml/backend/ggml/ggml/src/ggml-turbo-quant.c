@@ -1326,3 +1326,110 @@ size_t quantize_tq4_1s(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst
     }
     return nrows * row_size;
 }
+
+/* ---------- TURBO4_0_64: 4-bit PolarQuant with 64-element WHT rotation ----------
+ *
+ * head_dim=64 variant for models like gpt-oss. Block size = rotation group = 64.
+ * Layout: ggml_half norm + uint8_t qs[32], 34 bytes per 64 values (4.25 bpv).
+ *
+ * The reference reuses the 4-bit centroid table tuned for N(0, 1/128); the
+ * corrected_norm rescaling absorbs the variance shift to N(0, 1/64), so
+ * round-trip MSE stays within a few percent of an optimally retuned table.
+ * Retuned centroids can land later if calibration shows a real win.
+ *
+ * Dequant returns vectors in the rotated domain — the graph applies the
+ * inverse WHT via GGML_OP_TURBO_WHT (matching turbo4_0).
+ *
+ * PR-1 scope: CPU reference only. CUDA paths (PR-2), FA-vec instances at D=64
+ * (PR-3), and runtime resolver wiring (PR-5) follow.
+ */
+
+void quantize_row_turbo4_0_64_ref(const float * GGML_RESTRICT x, block_turbo4_0_64 * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TURBO_64 == 0);
+    const int nb = (int)(k / QK_TURBO_64);
+    const int d  = QK_TURBO_64;
+
+    static const float CENTROIDS_4BIT[16] = {
+        -0.173926f, -0.117195f, -0.089527f, -0.068756f,
+        -0.051262f, -0.035597f, -0.020989f, -0.006938f,
+         0.006938f,  0.020989f,  0.035597f,  0.051262f,
+         0.068756f,  0.089527f,  0.117195f,  0.173926f
+    };
+
+    for (int block = 0; block < nb; block++) {
+        const float * src = x + block * d;
+
+        /* 1. L2 norm over the block */
+        float norm_sq = 0.0f;
+        for (int i = 0; i < d; i++) norm_sq += src[i] * src[i];
+        const float norm = sqrtf(norm_sq);
+
+        /* 2. Normalize */
+        float buf[QK_TURBO_64];
+        if (norm > 1e-10f) {
+            const float inv = 1.0f / norm;
+            for (int i = 0; i < d; i++) buf[i] = src[i] * inv;
+        } else {
+            memset(buf, 0, d * sizeof(float));
+        }
+
+        /* 3. Forward WHT (group_size=64) */
+        turbo_cpu_fwht(buf, d);
+
+        /* 4. 4-bit quantize + accumulate recon norm for correction */
+        uint8_t indices[QK_TURBO_64];
+        float recon_norm_sq = 0.0f;
+        for (int i = 0; i < d; i++) {
+            indices[i] = (uint8_t)nearest_centroid_4bit(buf[i]);
+            recon_norm_sq += CENTROIDS_4BIT[indices[i]] * CENTROIDS_4BIT[indices[i]];
+        }
+        const float recon_norm = sqrtf(recon_norm_sq);
+        const float corrected_norm = (recon_norm > 1e-10f) ? norm / recon_norm : norm;
+        y[block].norm = GGML_FP32_TO_FP16(corrected_norm);
+
+        /* 5. Pack nibbles */
+        memset(y[block].qs, 0, d / 2);
+        for (int i = 0; i < d; i++) {
+            y[block].qs[i / 2] |= (uint8_t)((indices[i] & 0xF) << ((i % 2) * 4));
+        }
+    }
+}
+
+void dequantize_row_turbo4_0_64(const block_turbo4_0_64 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TURBO_64 == 0);
+    const int nb = (int)(k / QK_TURBO_64);
+    const int d  = QK_TURBO_64;
+
+    static const float CENTROIDS_4BIT[16] = {
+        -0.173926f, -0.117195f, -0.089527f, -0.068756f,
+        -0.051262f, -0.035597f, -0.020989f, -0.006938f,
+         0.006938f,  0.020989f,  0.035597f,  0.051262f,
+         0.068756f,  0.089527f,  0.117195f,  0.173926f
+    };
+
+    for (int block = 0; block < nb; block++) {
+        const float norm = GGML_FP16_TO_FP32(x[block].norm);
+        float * dst = y + block * d;
+        for (int i = 0; i < d; i++) {
+            const uint8_t idx = (x[block].qs[i / 2] >> ((i % 2) * 4)) & 0xF;
+            dst[i] = CENTROIDS_4BIT[idx] * norm;
+        }
+        /* Stays in rotated domain. The graph's GGML_OP_TURBO_WHT inverts. */
+    }
+}
+
+size_t quantize_turbo4_0_64(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst,
+                             int64_t nrows, int64_t n_per_row, const float * imatrix) {
+    GGML_UNUSED(imatrix);
+    assert(n_per_row % QK_TURBO_64 == 0);
+
+    const size_t row_size = (n_per_row / QK_TURBO_64) * sizeof(block_turbo4_0_64);
+    for (int64_t row = 0; row < nrows; row++) {
+        quantize_row_turbo4_0_64_ref(
+            src + row * n_per_row,
+            (block_turbo4_0_64 *)((char *)dst + row * row_size),
+            n_per_row
+        );
+    }
+    return nrows * row_size;
+}
