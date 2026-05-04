@@ -137,6 +137,27 @@ done
 [[ -z "$FTYPE" ]] && { echo "error: -f file_type is required" >&2; exit 2; }
 [[ -z "$HEAD_DIM" ]] && { echo "error: -d head_dim is required (0 = wildcard)" >&2; exit 2; }
 
+# Refuse turbo K-cache calibrations on models with head_dim < 128. Every turbo
+# dtype has blck_size = 128 and the WHT/Hadamard rotation is structurally tied
+# to that block, so the kvcache.Causal allocation pattern (head_dim,
+# num_kv_heads, cells) cannot represent the buffer when head_dim < 128. See
+# tools/turboquant/calibration/BLOCKER-gptoss-mxfp4.md for the full analysis
+# and tools/turboquant/calibration/FOLLOWUP-turbo-headdim64.md for the
+# head-packed-turbo project that would lift this restriction. -d 0 (wildcard)
+# is allowed because that asks the resolver to match any head_dim.
+if [[ "$HEAD_DIM" =~ ^[0-9]+$ && "$HEAD_DIM" -gt 0 && "$HEAD_DIM" -lt 128 ]]; then
+  echo "error: turbo K-cache calibration requires head_dim >= 128 (got $HEAD_DIM)." >&2
+  echo "       All turbo* dtypes have blck_size = 128 (QK_TURBO{2..6}); kvcache" >&2
+  echo "       cannot allocate a (head_dim, num_kv_heads, cells) tensor when the" >&2
+  echo "       leading dim is below blck_size." >&2
+  echo "       See tools/turboquant/calibration/BLOCKER-gptoss-mxfp4.md and" >&2
+  echo "       tools/turboquant/calibration/FOLLOWUP-turbo-headdim64.md." >&2
+  echo "       Affected models (head_dim<128) currently use the runtime fallback" >&2
+  echo "       (f16 K-cache); kq8-vturbo4 also fails on these models because the" >&2
+  echo "       V-side turbo storage hits the same block-alignment limit." >&2
+  exit 2
+fi
+
 if [[ -z "$SNAPSHOT" && -z "$CORPUS" ]]; then
   echo "error: must pass either -c <corpus> or -s <snapshot>" >&2; exit 2
 fi

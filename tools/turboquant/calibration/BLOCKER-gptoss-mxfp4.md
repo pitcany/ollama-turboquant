@@ -1,9 +1,21 @@
 # Blocker: gpt-oss MXFP4 calibration — turbo K cache vs head_dim=64
 
 **Date:** 2026-05-04
-**Status:** BLOCKED — architectural mismatch between ggml turbo dtype block size and gpt-oss head dimension.
-**Affects:** `tools/turboquant/calibration/manifest_data/` cannot ship a `gptoss / MXFP4 / head_dim=64` entry until the K cache storage layout is fixed.
-**Workaround for end users:** gpt-oss:20b will continue to fall back to the default `kq8-vturbo4` preset (no per-layer adaptive override).
+**Updated:** 2026-05-03 — Option C ("refuse turbo on head_dim<128 + clean fallback") landed.
+**Status:** GATED — runtime + calibration tooling now refuse turbo K/V cache types on
+models with head_dim < 128. Affected models fall back to `f16` K/V cache with a clear
+warning. The architectural restriction itself is unchanged; what landed is a clean
+gate so users do not see the `ggml.c:1717` assert. The head-packed-turbo follow-up
+that would actually let gpt-oss-class models use turbo K/V is tracked in
+[FOLLOWUP-turbo-headdim64.md](./FOLLOWUP-turbo-headdim64.md).
+**Affects:** `tools/turboquant/calibration/manifest_data/` cannot ship a `gptoss / MXFP4 /
+head_dim=64` entry until the FOLLOWUP project lands.
+**End-user impact:** gpt-oss:20b (and any other head_dim<128 model) gets the f16 K/V
+fallback when `OLLAMA_KV_CACHE_TYPE=turboquant-adaptive` (or `kq8-vturbo4`, or any
+turbo*) is requested, with a `slog.Warn("unsupported OLLAMA_KV_CACHE_TYPE", ...)` line
+in the runner log. `kq8-vturbo4` was previously assumed to work as the fallback path,
+but the V side hits the same block-alignment limit, so the safe fallback is f16 until
+the FOLLOWUP lands.
 
 ## Symptom
 

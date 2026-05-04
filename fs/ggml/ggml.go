@@ -886,11 +886,21 @@ func (f GGML) SupportsKVCacheType(cacheType string) bool {
 	}
 
 	if slices.Contains([]string{"turbo2", "turbo3", "turbo4", "turbo5", "turbo6"}, cacheType) {
-		headDim := f.KV().EmbeddingHeadCountK()
-		if headDim == 0 {
+		// All turbo dtypes have blck_size = 128 (QK_TURBO{2,3,4,5,6}) and
+		// the WHT/Hadamard rotation is structurally tied to that block.
+		// kvcache.Causal allocates K/V as (head_dim, num_kv_heads, cells),
+		// so the leading dim must be a multiple of 128 (and >= 128) for the
+		// underlying tensor to be addressable. Models with head_dim < 128
+		// (gpt-oss has 64) need the head-packed turbo follow-up; until that
+		// lands, refuse turbo dtypes here so the runtime falls back to f16.
+		// Both K and V sides must satisfy the constraint because turbo can
+		// live on either half of a split preset (e.g. kq8-vturbo4).
+		headDimK := f.KV().EmbeddingHeadCountK()
+		headDimV := f.KV().EmbeddingHeadCountV()
+		if headDimK == 0 || headDimV == 0 {
 			return false
 		}
-		return headDim%64 == 0
+		return headDimK >= 128 && headDimK%128 == 0 && headDimV >= 128 && headDimV%128 == 0
 	}
 
 	return false
