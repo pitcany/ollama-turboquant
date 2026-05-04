@@ -79,10 +79,12 @@ static __global__ void flash_attn_ext_vec(
     // Turbo types use the float2 Q path (like f16), not the q8_1 path.
     constexpr bool K_is_unquantized = type_K == GGML_TYPE_F16 ||
         type_K == GGML_TYPE_TURBO2_0 || type_K == GGML_TYPE_TURBO3_0 || type_K == GGML_TYPE_TURBO4_0 ||
-        type_K == GGML_TYPE_TURBO5_0 || type_K == GGML_TYPE_TURBO6_0;
+        type_K == GGML_TYPE_TURBO5_0 || type_K == GGML_TYPE_TURBO6_0 ||
+        type_K == GGML_TYPE_TURBO4_0_64;
     constexpr bool V_is_unquantized = type_V == GGML_TYPE_F16 ||
         type_V == GGML_TYPE_TURBO2_0 || type_V == GGML_TYPE_TURBO3_0 || type_V == GGML_TYPE_TURBO4_0 ||
-        type_V == GGML_TYPE_TURBO5_0 || type_V == GGML_TYPE_TURBO6_0;
+        type_V == GGML_TYPE_TURBO5_0 || type_V == GGML_TYPE_TURBO6_0 ||
+        type_V == GGML_TYPE_TURBO4_0_64;
 
     constexpr int nthreads_KQ = K_is_unquantized ? 128 / cpy_nb : nthreads_KQ_q;
     constexpr int nthreads_V  = V_is_unquantized ? 128 / cpy_nb : nthreads_V_q;
@@ -669,3 +671,11 @@ extern DECL_FATTN_VEC_CASE(256, GGML_TYPE_TURBO5_0, GGML_TYPE_TURBO4_0);
 extern DECL_FATTN_VEC_CASE( 64, GGML_TYPE_TURBO6_0, GGML_TYPE_TURBO4_0);
 extern DECL_FATTN_VEC_CASE(128, GGML_TYPE_TURBO6_0, GGML_TYPE_TURBO4_0);
 extern DECL_FATTN_VEC_CASE(256, GGML_TYPE_TURBO6_0, GGML_TYPE_TURBO4_0);
+
+// head_dim=64 turbo family (PR-3 of head_dim=64 series): D=64 only,
+// since QK_TURBO_64 = 64 is structural to the type.
+extern DECL_FATTN_VEC_CASE( 64, GGML_TYPE_TURBO4_0_64, GGML_TYPE_TURBO4_0_64);
+extern DECL_FATTN_VEC_CASE( 64, GGML_TYPE_F16,         GGML_TYPE_TURBO4_0_64);
+extern DECL_FATTN_VEC_CASE( 64, GGML_TYPE_Q8_0,        GGML_TYPE_TURBO4_0_64);
+extern DECL_FATTN_VEC_CASE( 64, GGML_TYPE_TURBO4_0_64, GGML_TYPE_F16);
+extern DECL_FATTN_VEC_CASE( 64, GGML_TYPE_TURBO4_0_64, GGML_TYPE_Q8_0);
