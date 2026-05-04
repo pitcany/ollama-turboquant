@@ -688,9 +688,15 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_turbo4(
             prev_blk = blk;
         }
 
-        // cpy_ne=4 pairs = 8 elements @ 4 bits = 32 bits = 4 bytes
-        uint32_t packed;
-        memcpy(&packed, &K_blk[blk].qs[qs_byte], sizeof(uint32_t));
+        uint32_t packed = 0;
+        if constexpr (cpy_ne == 2) {
+            uint16_t packed16;
+            memcpy(&packed16, &K_blk[blk].qs[qs_byte], sizeof(uint16_t));
+            packed = packed16;
+        } else {
+            // cpy_ne=4 pairs = 8 elements @ 4 bits = 32 bits = 4 bytes
+            memcpy(&packed, &K_blk[blk].qs[qs_byte], sizeof(uint32_t));
+        }
 
 #pragma unroll
         for (int k1 = 0; k1 < cpy_ne; ++k1) {
@@ -743,9 +749,9 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_turbo4_0_64(
             prev_blk = blk;
         }
 
-        // cpy_ne=4 pairs = 8 elements @ 4 bits = 32 bits = 4 bytes
-        uint32_t packed;
-        memcpy(&packed, &K_blk[blk].qs[qs_byte], sizeof(uint32_t));
+        // cpy_ne pairs = 2 elements @ 4 bits per pair = cpy_ne bytes
+        uint32_t packed = 0;
+        memcpy(&packed, &K_blk[blk].qs[qs_byte], cpy_ne);
 
 #pragma unroll
         for (int k1 = 0; k1 < cpy_ne; ++k1) {
