@@ -796,6 +796,7 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_turbo3_0_64(
         const int blk   = elem0 / QK_TURBO_64;
         const int qs_byte   = (elem0 % QK_TURBO_64) / 4;
         const int sign_byte = (elem0 % QK_TURBO_64) / 8;
+        const uint32_t sign_bit_base = elem0 & 0x7;
 
         if (blk != prev_blk) {
             const float norm = __half2float(K_blk[blk].norm);
@@ -811,8 +812,8 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_turbo3_0_64(
 #pragma unroll
         for (int k1 = 0; k1 < cpy_ne; ++k1) {
             const uint32_t qs_shift  = k1 * 4;
-            const uint32_t sign_bit0 = k1 * 2;
-            const uint32_t sign_bit1 = k1 * 2 + 1;
+            const uint32_t sign_bit0 = sign_bit_base + k1 * 2;
+            const uint32_t sign_bit1 = sign_bit0 + 1;
 
             const uint8_t idx0 = ((qs_packed >> qs_shift)        & 0x3) | (((signs >> sign_bit0) & 0x1) << 2);
             const uint8_t idx1 = ((qs_packed >> (qs_shift + 2))  & 0x3) | (((signs >> sign_bit1) & 0x1) << 2);
