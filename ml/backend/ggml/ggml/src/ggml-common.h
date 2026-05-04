@@ -307,6 +307,24 @@ static_assert(sizeof(block_turbo4_0) == 2*sizeof(ggml_half) + QK_TURBO4*3/8 + QK
 
 static_assert(QK_TURBO4 == 128, "turbo4 kernels assume QK_TURBO4 == 128");
 
+// TurboQuant 4-bit, head_dim=64 variant: 4-bit PolarQuant indices, no QJL
+// Layout matches turbo4_0 in 4-bit mode (TURBO4_USE_4BIT=1) but with half the
+// payload — drops the unused rnorm field. Block size = rotation group = 64.
+// Per block: norm(fp16) + 4-bit indices (32 bytes) = 34 bytes per 64 values
+// = 4.25 bits/value -> 3.76x compression vs fp16 (matches turbo4_0).
+// PR-1: CPU reference only. CUDA / FA-vec instances land in PR-2/PR-3.
+#define QK_TURBO_64 64
+#define QK_TURBO4_64_GROUP 64  // rotation group size = head_dim = blck_size
+// Derived: FA template nl parameters (PR-3 uses these for D=64 instances)
+#define NL_TURBO4_64     (QK_TURBO_64 / 16)   // 4
+#define NL_TURBO4_64_VEC (QK_TURBO_64 / 4)    // 16
+typedef struct {
+    ggml_half  norm;                          //  2 bytes: corrected L2 norm
+    uint8_t    qs[QK_TURBO_64 / 2];          // 32 bytes: 4-bit PolarQuant indices (nibble packed)
+} block_turbo4_0_64;                          // 34 bytes total
+static_assert(sizeof(block_turbo4_0_64) == sizeof(ggml_half) + QK_TURBO_64/2, "wrong turbo4_0_64 block size");
+static_assert(QK_TURBO_64 == 64, "turbo4_0_64 kernels assume QK_TURBO_64 == 64");
+
 // TurboQuant 2-bit: 2-bit PolarQuant indices only (no QJL)
 // Per block: norm(fp16) + 2-bit indices (8 bytes) = 10 bytes per 32 values
 // = 2.5 bits/value -> 6.4x compression vs fp16
