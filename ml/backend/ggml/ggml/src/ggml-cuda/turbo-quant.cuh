@@ -373,6 +373,24 @@ static __device__ __forceinline__ float turbo4_0_64_dequant_element(
     return TURBO_CENTROIDS_4BIT[idx] * norm;
 }
 
+// ---- Inline dequant helpers for turbo{2,3}_0_64 ----
+// (per-block quantize helpers are not provided here — the SET_ROWS kernels
+// in set-rows.cu do the full quantize inline, mirroring turbo4_0_64.)
+
+static __device__ __forceinline__ float turbo2_0_64_dequant_element(
+        const block_turbo2_0_64 * __restrict__ x, int j, float norm) {
+    uint8_t idx = (x->qs[j / 4] >> ((j % 4) * 2)) & 0x3;
+    return TURBO_CENTROIDS_2BIT[idx] * norm;
+}
+
+static __device__ __forceinline__ float turbo3_0_64_dequant_element(
+        const block_turbo3_0_64 * __restrict__ x, int j, float norm) {
+    uint8_t low2 = (x->qs[j / 4] >> ((j % 4) * 2)) & 0x3;
+    uint8_t hi1  = (x->signs[j / 8] >> (j % 8)) & 0x1;
+    uint8_t idx  = low2 | (hi1 << 2);
+    return TURBO_CENTROIDS_3BIT[idx] * norm;
+}
+
 // ---- 5-bit centroids (Lloyd-Max for N(0, 1/128), seed=20260501) ----
 
 static __constant__ float TURBO_CENTROIDS_5BIT[32] = {
