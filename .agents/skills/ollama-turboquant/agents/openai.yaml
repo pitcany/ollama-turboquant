@@ -1,0 +1,6 @@
+interface:
+  display_name: "Ollama Turboquant"
+  short_description: "Repo-specific patterns and workflows for ollama-turboquant"
+  default_prompt: "Use the ollama-turboquant repo skill to follow existing architecture, testing, and workflow conventions."
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,589 @@
+# Instincts generated from https://github.com/pitcany/ollama-turboquant
+# Generated: 2026-05-02T17:21:47.612Z
+# Version: 2.0
+# NOTE: This file supplements (does not replace) any existing curated instincts.
+# High-confidence manually curated instincts should be preserved alongside these.
+
+---
+id: ollama-turboquant-commit-conventional
+trigger: "when writing a commit message"
+confidence: 0.85
+domain: git
+source: repo-analysis
+source_repo: https://github.com/pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Commit Conventional
+
+## Action
+
+Use conventional commit format with prefixes: feat, docs, test, tools, fix
+
+## Evidence
+
+- 12 commits analyzed
+- Detected conventional commit pattern
+- Examples: feat(kvcache): support split K/V dtypes and per-layer K overrides on Recurrent, test(model): guard split-init promotion on qwen3next/nemotronh/lfm2 HybridCache
+
+---
+id: ollama-turboquant-commit-length
+trigger: "when writing a commit message"
+confidence: 0.6
+domain: git
+source: repo-analysis
+source_repo: https://github.com/pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Commit Length
+
+## Action
+
+Write moderate-length commit messages (~66 characters)
+
+## Evidence
+
+- Average commit message length: 66 chars
+- Based on 12 commits
+
+---
+id: ollama-turboquant-naming-files
+trigger: "when creating a new file"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Naming Files
+
+## Action
+
+Use snake_case naming convention
+
+## Evidence
+
+- Analyzed file naming patterns in repository
+- Dominant pattern: snake_case
+
+---
+id: ollama-turboquant-import-relative
+trigger: "when importing modules"
+confidence: 0.75
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Import Relative
+
+## Action
+
+Use relative imports for project files
+
+## Evidence
+
+- Import analysis shows relative import pattern
+- Example: import { x } from '../lib/x'
+
+---
+id: ollama-turboquant-export-style
+trigger: "when exporting from a module"
+confidence: 0.7
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Export Style
+
+## Action
+
+Prefer named exports
+
+## Evidence
+
+- Export pattern analysis
+- Dominant style: named
+
+---
+id: ollama-turboquant-test-separate
+trigger: "when writing tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Test Separate
+
+## Action
+
+Place tests in the tests/ or __tests__/ directory, mirroring src structure
+
+## Evidence
+
+- Separate test directory pattern detected
+- Tests live in dedicated test folders
+
+---
+id: ollama-turboquant-workflow-feature-development
+trigger: "when implementing a new feature"
+confidence: 0.9
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Workflow Feature Development
+
+## Action
+
+Follow the feature-development workflow:
+1. Add feature implementation
+2. Add tests for feature
+3. Update documentation
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~15x per month
+- Files: **/*.test.*
+
+---
+id: ollama-turboquant-workflow-feature-implementation-with-tests-and-docs
+trigger: "when doing feature implementation with tests and docs"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Workflow Feature Implementation With Tests And Docs
+
+## Action
+
+Follow the feature-implementation-with-tests-and-docs workflow:
+1. Implement or refactor main logic in one or more source files.
+2. Add or update corresponding unit/integration tests in *_test.go files.
+3. Update documentation or debug logs (e.g., TURBOQUANT-DEBUG-LOG.md) to describe the change, rationale, and verification steps.
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: kvcache/*.go, kvcache/*_test.go, TURBOQUANT-DEBUG-LOG.md
+
+---
+id: ollama-turboquant-workflow-calibration-artifact-generation-and-bundling
+trigger: "when doing calibration artifact generation and bundling"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Workflow Calibration Artifact Generation And Bundling
+
+## Action
+
+Follow the calibration-artifact-generation-and-bundling workflow:
+1. Run scripts/turboquant-calibrate.sh to generate calibration data.
+2. Add or update a calibration artifact JSON file under tools/turboquant/calibration/manifest_data/.
+3. Patch manifest.json to include or update the entry for the new artifact.
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: scripts/turboquant-calibrate.sh, tools/turboquant/calibration/manifest_data/*.json
+
+---
+id: ollama-turboquant-workflow-calibration-session-documentation
+trigger: "when doing calibration session documentation"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Workflow Calibration Session Documentation
+
+## Action
+
+Follow the calibration-session-documentation workflow:
+1. Edit TURBOQUANT-DEBUG-LOG.md to add a new dated entry.
+2. Describe what was run, what artifacts were produced, and the results.
+3. Note any issues, blocks, or next steps for future operators.
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: TURBOQUANT-DEBUG-LOG.md
+
+---
+id: ollama-turboquant-workflow-test-promotion-or-interface-assertion
+trigger: "when doing test promotion or interface assertion"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Workflow Test Promotion Or Interface Assertion
+
+## Action
+
+Follow the test-promotion-or-interface-assertion workflow:
+1. Add or update package-local *_test.go files in model/models/*/ to assert interface satisfaction.
+2. Add or update runner-level tests (e.g., runner/ollamarunner/cache_test.go) to verify interface usage at runtime.
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: model/models/*/cache_test.go, runner/ollamarunner/cache_test.go
+
+---
+id: ollama-turboquant-workflow-documentation-and-operator-guide-update
+trigger: "when doing documentation and operator guide update"
+confidence: 0.55
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Workflow Documentation And Operator Guide Update
+
+## Action
+
+Follow the documentation-and-operator-guide-update workflow:
+1. Create or update a markdown guide (e.g., USAGE.md) with step-by-step instructions.
+2. Update existing docs (e.g., README.md) to reference the new or updated guide.
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~1x per month
+- Files: tools/turboquant/USAGE.md, tools/turboquant/README.md
+
+---
+id: ollama-turboquant-instinct-file-naming
+trigger: "When creating or renaming files in the repository"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Instinct File Naming
+
+## Action
+
+Use snake_case for file names
+
+## Evidence
+
+- Pattern in codeStyle.namingConventions.files
+- All files in kvcache/ and tools/ use snake_case
+
+---
+id: ollama-turboquant-instinct-function-naming
+trigger: "When defining a new function"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Instinct Function Naming
+
+## Action
+
+Use camelCase for function names
+
+## Evidence
+
+- Pattern in codeStyle.namingConventions.functions
+- Functions in kvcache/*.go follow camelCase
+
+---
+id: ollama-turboquant-instinct-class-naming
+trigger: "When defining a new struct or class"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Instinct Class Naming
+
+## Action
+
+Use PascalCase for struct/class names
+
+## Evidence
+
+- Pattern in codeStyle.namingConventions.classes
+- Structs in model/ and kvcache/ use PascalCase
+
+---
+id: ollama-turboquant-instinct-constant-naming
+trigger: "When declaring a constant"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Instinct Constant Naming
+
+## Action
+
+Use SCREAMING_SNAKE_CASE for constant names
+
+## Evidence
+
+- Pattern in codeStyle.namingConventions.constants
+- Constants in kvcache/*.go use SCREAMING_SNAKE_CASE
+
+---
+id: ollama-turboquant-instinct-import-style
+trigger: "When importing modules/packages"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Instinct Import Style
+
+## Action
+
+Use relative imports
+
+## Evidence
+
+- Pattern in codeStyle.importStyle
+- Imports in model/ and kvcache/ use relative paths
+
+---
+id: ollama-turboquant-instinct-export-style
+trigger: "When exporting functions or types"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Instinct Export Style
+
+## Action
+
+Use named exports
+
+## Evidence
+
+- Pattern in codeStyle.exportStyle
+- Exported functions/types in Go are named and capitalized
+
+---
+id: ollama-turboquant-instinct-test-location
+trigger: "When adding tests for a module"
+confidence: 0.9
+domain: testing
+source: repo-analysis
+source_repo: pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Instinct Test Location
+
+## Action
+
+Place tests in *_test.go files in the same or parallel directory as the source
+
+## Evidence
+
+- Pattern in architecture.folderStructure.testLocation
+- Files like kvcache/recurrent_test.go, model/models/lfm2/cache_test.go
+
+---
+id: ollama-turboquant-instinct-test-interface-assertion
+trigger: "When adding or modifying methods that use interface embedding or promotion"
+confidence: 0.9
+domain: testing
+source: repo-analysis
+source_repo: pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Instinct Test Interface Assertion
+
+## Action
+
+Add or update *_test.go files to assert interface satisfaction and runtime behavior
+
+## Evidence
+
+- Workflow 'test-promotion-or-interface-assertion'
+- Commits covering initKVCache with hybrid cache
+
+---
+id: ollama-turboquant-instinct-test-feature
+trigger: "When implementing a new feature or refactoring core logic"
+confidence: 0.95
+domain: testing
+source: repo-analysis
+source_repo: pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Instinct Test Feature
+
+## Action
+
+Add or update corresponding unit/integration tests in *_test.go files
+
+## Evidence
+
+- Workflow 'feature-implementation-with-tests-and-docs'
+- Commits: test(model): guard split-init promotion...
+
+---
+id: ollama-turboquant-instinct-git-conventional-commits
+trigger: "When writing a commit message"
+confidence: 0.95
+domain: git
+source: repo-analysis
+source_repo: pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Instinct Git Conventional Commits
+
+## Action
+
+Use conventional commit prefixes: feat, docs, test, tools, fix
+
+## Evidence
+
+- Pattern in commits.prefixes
+- Examples: feat(kvcache):..., test(model):..., docs(turboquant):...
+
+---
+id: ollama-turboquant-instinct-git-commit-length
+trigger: "When writing a commit message"
+confidence: 0.7
+domain: git
+source: repo-analysis
+source_repo: pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Instinct Git Commit Length
+
+## Action
+
+Keep commit messages concise, averaging around 66 characters
+
+## Evidence
+
+- Pattern in commits.averageLength
+- Sample commit messages
+
+---
+id: ollama-turboquant-instinct-feature-with-tests-docs
+trigger: "When adding a new feature, refactoring a core subsystem, or changing a critical workflow"
+confidence: 0.95
+domain: workflow
+source: repo-analysis
+source_repo: pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Instinct Feature With Tests Docs
+
+## Action
+
+Implement or refactor logic, add/update tests, and update documentation or debug logs
+
+## Evidence
+
+- Workflow 'feature-implementation-with-tests-and-docs'
+- Commits: feat(kvcache):..., test(model):..., docs(turboquant):...
+
+---
+id: ollama-turboquant-instinct-calibrate-and-bundle
+trigger: "When adding support for a new model or quantization scheme to TurboQuant's adaptive calibration"
+confidence: 0.95
+domain: workflow
+source: repo-analysis
+source_repo: pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Instinct Calibrate And Bundle
+
+## Action
+
+Run calibration script, add/update calibration artifact JSON, and patch manifest.json
+
+## Evidence
+
+- Workflow 'calibration-artifact-generation-and-bundling'
+- Commits: tools/turboquant/calibration/manifest_data/*.json
+
+---
+id: ollama-turboquant-instinct-document-calibration-session
+trigger: "After running a calibration or making a significant change to the calibration pipeline"
+confidence: 0.9
+domain: workflow
+source: repo-analysis
+source_repo: pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Instinct Document Calibration Session
+
+## Action
+
+Edit TURBOQUANT-DEBUG-LOG.md to add a new dated entry with results and issues
+
+## Evidence
+
+- Workflow 'calibration-session-documentation'
+- Commits: docs(turboquant): record HybridCache split-init smoke pass
+
+---
+id: ollama-turboquant-instinct-test-interface-promotion
+trigger: "When adding or modifying methods expected to be promoted via embedding or when interface assertions are critical"
+confidence: 0.9
+domain: workflow
+source: repo-analysis
+source_repo: pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Instinct Test Interface Promotion
+
+## Action
+
+Add or update *_test.go files in model/models/*/ and runner/ollamarunner/ to assert interface satisfaction and runtime behavior
+
+## Evidence
+
+- Workflow 'test-promotion-or-interface-assertion'
+- Commits: test(runner): cover initKVCache with a real Recurrent-backed hybrid cache
+
+---
+id: ollama-turboquant-instinct-update-operator-guide
+trigger: "When new features, workflows, or gotchas need to be communicated to operators or end-users"
+confidence: 0.85
+domain: workflow
+source: repo-analysis
+source_repo: pitcany/ollama-turboquant
+---
+
+# Ollama Turboquant Instinct Update Operator Guide
+
+## Action
+
+Create or update markdown guides (USAGE.md), and update README.md to reference them
+
+## Evidence
+
+- Workflow 'documentation-and-operator-guide-update'
+- Files: tools/turboquant/USAGE.md, tools/turboquant/README.md
+
